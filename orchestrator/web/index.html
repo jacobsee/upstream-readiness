@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Upstream Readiness - Orchestrator</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+
+    <!-- Plugin MFE bundles leave React as a bare import. This import map
+         resolves them to the orchestrator's own /vendor/ entries (built
+         by vite.config.js), which share the shell's React instance.
+         Nothing here is fetched from a CDN. PatternFly's stylesheet is
+         bundled from main.jsx, so every plugin panel renders against
+         the same theme. -->
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "/vendor/react.js",
+          "react/jsx-runtime": "/vendor/react-jsx-runtime.js",
+          "react-dom": "/vendor/react-dom.js",
+          "react-dom/client": "/vendor/react-dom-client.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

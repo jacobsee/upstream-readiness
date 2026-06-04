@@ -1,0 +1,43 @@
+# Rebase the OpenShift fork of Kubernetes onto a new upstream release.
+#
+#   git checkout -b rebase/<tag> <tag>; git merge -s ours <fork master>
+#   cherry-pick every UPSTREAM: <carry> / UPSTREAM: <PR#> commit since the
+#   previous rebase (UPSTREAM: <drop> commits are skipped), pausing for a
+#   human on conflicts and on commits it can't classify, then run the
+#   dependency / patch-queue / make pipeline and force-push to the fork.
+#
+# Create an "Upstream Rebase" instance first (Instances → Upstream
+# Rebase → New instance) and set `instance:` below to its ID.
+
+id: openshift-kubernetes-rebase
+display_name: "OpenShift Kubernetes Rebase"
+# schedule: "0 6 * * 1"
+
+steps:
+  - id: rebase-kubernetes
+    plugin: upstream-rebase
+    instance: ffd11c3a-d8c8-4ff4-84b9-c9131dd495d7
+    action: rebase
+    # Clone + replaying hundreds of carries + make update easily exceeds
+    # the 30m default. Time spent waiting for a human doesn't count.
+    timeout: 4h
+    params:
+      clone_url: "https://github.com/openshift/kubernetes"
+      fork_branch: master
+      upstream_url: "https://github.com/kubernetes/kubernetes"
+      target_ref: v1.38.0-alpha.1
+      previous_rebase_commit: "499af7d8347b907c603fe5a4ed01b5bce4be2e20"
+      # previous_rebase_commit: ""   # auto-detected; set to override
+      # rerere: suggest              # off | suggest | auto
+      # Same semantics as generic-go-dep's dirs. Runs after every commit
+      # has been re-applied. Generated commits are UPSTREAM: <drop>.
+      dirs:
+       - path: "."
+          # make_targets: [update]
+      # Bare shell commands, run in order after everything above (re-picks,
+      # then every dir's bumps / vendor / patches / make targets). Each
+      # one's changes are committed as "UPSTREAM: <drop>: <name>".
+      # commands:
+        # - name: regenerate openapi
+        #   run: "hack/update-openapi-spec.sh"
+        #   dir: "."                 # optional, relative to the repo root

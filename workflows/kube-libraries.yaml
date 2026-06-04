@@ -1,0 +1,129 @@
+# kube-rebase.workflow.yaml
+
+id: kube-rebase-all-libraries
+display_name: "Kube Upstream Rebase (All Libraries)"
+# schedule: "0 6 * * 1"  # every Monday at 06:00 UTC
+
+steps:
+  - id: update-api
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    params:
+      clone_url: "https://github.com/openshift/api"
+      dirs:
+        # - path: "tests"
+        #   run_vendor: true
+        #   make_targets:
+        #   - update
+        #   updates:
+        #     - dependency: "k8s.io/apiextensions-apiserver"
+        #       target_version: "v0.38.0-alpha.1"
+        #     - dependency: "k8s.io/apimachinery"
+        #       target_version: "v0.38.0-alpha.1"
+        #     - dependency: "k8s.io/client-go"
+        #       target_version: "v0.38.0-alpha.1"
+        - path: "tools"
+          run_vendor: true
+          # make_targets:
+          # - update
+          updates:
+            - dependency: "k8s.io/apiextensions-apiserver"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/apimachinery"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/code-generator"
+              target_version: "v0.38.0-alpha.1"
+        - path: "."
+          run_vendor: true
+          make_targets:
+            - update
+          updates:
+            - dependency: "k8s.io/api"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/apimachinery"
+              target_version: "v0.38.0-alpha.1"
+
+  - id: update-client-go
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-api]
+    params:
+      clone_url: "https://github.com/openshift/client-go"
+      dirs:
+        - path: "."
+          run_vendor: true
+          make_targets:
+          - update
+          updates:
+            - dependency: "github.com/openshift/api"
+              target_version:
+                __ref: { step: update-api, output: commit }
+            - dependency: "k8s.io/api"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/apimachinery"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/client-go"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/code-generator"
+              target_version: "v0.38.0-alpha.1"
+
+  - id: update-library-go
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-api, update-client-go]
+    params:
+      clone_url: "https://github.com/openshift/library-go"
+      dirs:
+        - path: "."
+          run_vendor: true
+          make_targets:
+          - update
+          updates:
+            - dependency: "github.com/openshift/api"
+              target_version:
+                __ref: { step: update-api, output: commit }
+            - dependency: "github.com/openshift/client-go"
+              target_version:
+                __ref: { step: update-client-go, output: commit }
+            - dependency: "k8s.io/kms"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/kube-aggregator"
+              target_version: "v0.38.0-alpha.1"
+
+  - id: update-apiserver-library-go
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-api, update-client-go, update-library-go]
+    params:
+      clone_url: "https://github.com/openshift/apiserver-library-go"
+      dirs:
+        - path: "."
+          run_vendor: true
+          make_targets:
+          - update
+          updates:
+            - dependency: "github.com/openshift/api"
+              target_version:
+                __ref: { step: update-api, output: commit }
+            - dependency: "github.com/openshift/client-go"
+              target_version:
+                __ref: { step: update-client-go, output: commit }
+            - dependency: "github.com/openshift/library-go"
+              target_version:
+                __ref: { step: update-library-go, output: commit }
+            - dependency: "k8s.io/api"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/apimachinery"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/apiserver"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/client-go"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/code-generator"
+              target_version: "v0.38.0-alpha.1"
+            - dependency: "k8s.io/kubernetes"
+              target_version: "v1.38.0-alpha.1"

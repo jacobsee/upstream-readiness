@@ -1,0 +1,306 @@
+syntax = "proto3";
+
+package pluginsdk.v1;
+
+option go_package = "github.com/jacobsee/upstream-readiness/proto/gen/pluginsdk/v1;pluginsdkv1";
+
+// Plugin is the single stable contract every plugin implements.
+// The orchestrator speaks only this interface and treats every plugin-owned
+// blob (instance config, step params, outputs, progress payloads) as
+// opaque bytes.
+service Plugin {
+  // Self-description. The manifest tells the orchestrator what slots the
+  // plugin's MFE supports, which actions exist, and what each action
+  // declares as named outputs that downstream steps may bind to.
+  rpc Describe(DescribeRequest) returns (PluginManifest);
+
+  // Execute an action. Server-streams a sequence of ExecuteEvent messages
+  // culminating in a single Final event. Progress events between the
+  // start and Final carry opaque bytes the plugin's own MFE renders in
+  // the "step-runtime" slot; the orchestrator forwards them verbatim.
+  rpc Execute(ExecuteRequest) returns (stream ExecuteEvent);
+
+  // Validate an opaque blob the orchestrator is about to persist.
+  // Used at instance-save and workflow-save time so plugins can reject
+  // bad configs/params without the orchestrator ever parsing them.
+  // The orchestrator surfaces the returned errors in the UI verbatim.
+  rpc Validate(ValidateRequest) returns (ValidateResponse);
+
+  // Serve one file from the plugin's micro-frontend bundle. The browser
+  // never talks to a plugin directly: the orchestrator exposes
+  // /plugins/{id}/assets/{path} on its own origin and streams this RPC's
+  // bytes through verbatim. The stream is one AssetChunk carrying the
+  // header, followed by zero or more data chunks.
+  rpc GetAsset(GetAssetRequest) returns (stream AssetChunk);
+
+  // Tell the plugin a workflow step has reached a terminal state in the
+  // orchestrator (succeeded, failed, cancelled, skipped) and will never
+  // be executed or resumed again. The plugin drops anything it kept on
+  // disk / in memory for that (workflow_run_id, step_id) - notably the
+  // working copy of a step that suspended and was then cancelled, which
+  // it otherwise has no way to learn about. Durable plugin memory keyed
+  // by (workflow_id, step_id) - saved resolutions, patch queues - is
+  // NOT dropped; it outlives any one run.
+  //
+  // Best-effort and idempotent: the orchestrator calls it once per
+  // started step with bounded retries, may call it for a step the plugin
+  // already cleaned up, and does not fail the run if it errors. Plugins
+  // with nothing to release may leave it unimplemented (UNIMPLEMENTED is
+  // treated as success).
+  rpc ReleaseStep(ReleaseStepRequest) returns (ReleaseStepResponse);
+
+  // Tell the plugin a workflow definition is being purged from the
+  // orchestrator. The plugin deletes everything it keeps for workflow_id:
+  // durable per-(workflow_id, step_id) memory (patch queues, saved
+  // resolutions, …), per-run records and command history of the
+  // workflow's runs, and any working copies still on disk for them.
+  //
+  // Called only after the workflow was removed and none of its runs is
+  // still running. Must be idempotent: a purge that failed part-way is
+  // retried by the user, and every registered plugin is asked, including
+  // ones that never held anything for the workflow. Plugins with nothing
+  // to purge may leave it unimplemented (UNIMPLEMENTED is treated as
+  // success). Any other error aborts the purge before the orchestrator
+  // deletes its own records, so it can be retried.
+  rpc PurgeWorkflow(PurgeWorkflowRequest) returns (PurgeWorkflowResponse);
+}
+
+message PurgeWorkflowRequest {
+  string workflow_id = 1;
+}
+
+message PurgeWorkflowResponse {
+  // Rows (or other items) deleted, per plugin-chosen category name.
+  // Informational; shown to the user verbatim.
+  map<string, int64> deleted = 1;
+}
+
+message ReleaseStepRequest {
+  string workflow_run_id = 1;
+  string step_id = 2;
+  string workflow_id = 3;
+  string instance_id = 4;
+  string action = 5;
+  // The step's terminal status as the orchestrator recorded it:
+  // "succeeded" | "failed" | "cancelled" | "skipped". Informational.
+  string status = 6;
+}
+
+message ReleaseStepResponse {}
+
+message DescribeRequest {}
+
+message PluginManifest {
+  string id = 1;
+  string display_name = 2;
+  string version = 3;
+  // Path of the micro-frontend's ES module entry point inside the
+  // plugin's asset root (what GetAsset serves), e.g. "greeter-mfe.js".
+  // The orchestrator turns it into /plugins/{id}/assets/{mfe_entry} on
+  // its own origin; relative imports inside the module resolve under
+  // the same prefix.
+  string mfe_entry = 4;
+  // Default named export the orchestrator mounts when no slot-specific
+  // entry point is declared. Empty string means "default export".
+  string mfe_element = 5;
+  // Actions the plugin exposes. Used by the orchestrator only to thread
+  // outputs through the DAG and let downstream step editors enumerate
+  // available upstream values; the orchestrator never parses params.
+  repeated ActionDescriptor actions = 6;
+  // MFE slots this plugin's UI handles. The orchestrator mounts the
+  // plugin's component in different slots and passes a `mode` prop
+  // matching the slot name. Each slot may override the mfe_element used.
+  //
+  // Known slot names (the orchestrator ignores unknown slot names so
+  // plugins can declare experimental slots without breaking the shell):
+  //   "action"                - per-action runtime panel (ad-hoc invocation)
+  //   "instance-config"       - create/edit a plugin instance
+  //   "step-editor"           - edit a workflow step's opaque params blob
+  //   "step-runtime"          - live per-step progress panel during a run
+  //   "workflow-step-config"  - persistent per-(workflow_id,step_id) config
+  //   "instance-list-item"    - per-row content in the instances list
+  //   "sidebar-badge"         - tiny live indicator next to the sidebar entry
+  //   "plugin-home"           - plugin's landing surface when its sidebar
+  //                             entry is clicked (replaces the ad-hoc panel
+  //                             when declared)
+  //   "resolution"            - human-in-the-loop resolution prompt, mounted
+  //                             while a step is suspended (see ExecuteSuspend)
+  repeated MfeSlot mfe_slots = 7;
+}
+
+message ActionDescriptor {
+  string name = 1;
+  string description = 2;
+  // Named outputs this action produces. Names only - the orchestrator
+  // threads the bytes through to downstream steps; the meaning is
+  // entirely between the plugin's producer and consumer code.
+  repeated ActionOutput outputs = 3;
+}
+
+message ActionOutput {
+  // Output name, e.g. "commit". Scoped to (step_id, output_name) at
+  // runtime so multiple steps of the same plugin don't collide.
+  string name = 1;
+  // Free-form description shown in step-editor UI when downstream steps
+  // pick from available upstream outputs.
+  string description = 2;
+}
+
+message MfeSlot {
+  // Slot identifier the orchestrator recognizes (see PluginManifest for
+  // the current vocabulary). Unknown slot names are ignored.
+  string slot = 1;
+  // Named export inside the MFE module the orchestrator should mount
+  // when entering this slot. Empty falls back to PluginManifest.mfe_element.
+  string mfe_element = 2;
+}
+
+// StepOutputs is the bag of named outputs produced by a single step.
+// The orchestrator stores these keyed by step_id and forwards them to
+// downstream steps' Execute calls as upstream_outputs.
+message StepOutputs {
+  // output name -> opaque bytes the plugin emitted.
+  map<string, bytes> values = 1;
+}
+
+message ExecuteRequest {
+  string action = 1;
+  // Opaque step params blob from the workflow definition (or from a
+  // direct UI invocation for ad-hoc runs).
+  bytes payload = 2;
+  // The plugin instance this call should act as. Empty for ad-hoc
+  // invocations that haven't picked an instance; plugins may refuse to
+  // run without one.
+  string instance_id = 3;
+  // The opaque instance configuration blob the orchestrator stored
+  // when the instance was created. Empty when instance_id is empty.
+  bytes instance_config = 4;
+  // Outputs from upstream steps in the same workflow run, keyed by
+  // step_id. The plugin resolves its own marker syntax against this map.
+  map<string, StepOutputs> upstream_outputs = 5;
+  // Identity scoping so plugins can correlate state across runs.
+  // workflow_run_id is unique per run (e.g. "upstream-rebase-172937").
+  string workflow_run_id = 6;
+  string step_id = 7;
+  // 1-indexed attempt count. Plugins use this for idempotency / detecting
+  // retries.
+  uint32 attempt = 8;
+  // Stable key the orchestrator guarantees is identical across retries
+  // of the same logical step. Plugins should treat repeated calls with
+  // the same idempotency_key as a single logical operation.
+  string idempotency_key = 9;
+  // workflow_id is the stable definition ID (e.g. "upstream-rebase").
+  // Distinct from workflow_run_id, which includes a per-run suffix.
+  // Plugins that persist per-workflow memory (canned conflict
+  // resolutions, always-apply fix commits, etc.) key by workflow_id and
+  // step_id. Empty for ad-hoc invocations not tied to a workflow.
+  string workflow_id = 10;
+  // Opaque blob produced by the plugin's own "resolution" MFE slot when
+  // a human (or other resolver) answered a prompt this step emitted via
+  // ExecuteSuspend. Empty on the first execution of a step; populated on
+  // every re-execution after a resume. The orchestrator never parses it.
+  bytes resolution = 11;
+}
+
+// ExecuteEvent is a single message in the Execute response stream.
+// A plugin emits zero or more Progress events followed by exactly one
+// terminal event: either Final (the step is done) or Suspend (the step
+// needs outside input before it can continue). The orchestrator forwards Progress payloads verbatim to
+// the browser (via SSE) and persists the most recent one under
+// run_steps.progress_blob so page reloads and late subscribers see the
+// current state.
+message ExecuteEvent {
+  oneof event {
+    ExecuteProgress progress = 1;
+    ExecuteFinal final = 2;
+    ExecuteSuspend suspend = 3;
+  }
+}
+
+message ExecuteProgress {
+  // Opaque bytes the plugin's MFE renders in the "step-runtime" slot.
+  // The orchestrator does not parse this. A common convention is a JSON
+  // object with a plugin-owned shape (phase, log tail, percentage, …),
+  // but any bytes are legal.
+  bytes payload = 1;
+}
+
+message ExecuteFinal {
+  // Opaque blob the orchestrator forwards back to the caller (the
+  // plugin's own UI, when invoked ad-hoc). The workflow runner ignores
+  // this field; it threads only `outputs` forward.
+  bytes result = 1;
+  // Named outputs produced by this step. Bytes are opaque; the
+  // orchestrator stores them keyed by (step_id, output_name) and passes
+  // them as upstream_outputs to downstream steps.
+  StepOutputs outputs = 2;
+}
+
+// ExecuteSuspend ends an Execute stream without finishing the step. The
+// orchestrator parks the step in "awaiting_resolution", mounts the
+// plugin's "resolution" MFE slot with `prompt`, and - once the slot
+// resolves - calls Execute again for the same step with
+// ExecuteRequest.resolution set to the blob the slot produced. Plugins
+// must not block inside Execute waiting for a human; they suspend.
+message ExecuteSuspend {
+  // Opaque bytes the plugin's "resolution" MFE slot renders. Never
+  // parsed by the orchestrator.
+  bytes prompt = 1;
+}
+
+// ValidateRequest asks the plugin to vet an opaque blob it owns the
+// shape of. The orchestrator never parses the blob; it just forwards it.
+message ValidateRequest {
+  // Which kind of blob this is, e.g. "instance" or "step".
+  string kind = 1;
+  // The opaque blob to validate.
+  bytes payload = 2;
+  // For step validation, the instance the step targets and that
+  // instance's config (so the plugin can validate params against the
+  // instance's settings). Empty for instance validation.
+  string instance_id = 3;
+  bytes instance_config = 4;
+  // For step validation, the upstream outputs available at workflow
+  // edit time (with placeholder values). Empty for instance validation.
+  map<string, StepOutputs> upstream_outputs = 5;
+  // For step validation, the workflow definition ID this step belongs
+  // to. Empty when validating a fresh step outside a workflow context.
+  string workflow_id = 6;
+}
+
+message ValidateResponse {
+  // True if the blob is acceptable. If false, errors must be populated.
+  bool valid = 1;
+  // Human-readable errors the orchestrator surfaces verbatim in the UI.
+  // The orchestrator does not parse these; they are for display.
+  repeated string errors = 2;
+}
+
+message GetAssetRequest {
+  // Slash-separated path relative to the plugin's asset root, without a
+  // leading slash (e.g. "greeter-mfe.js"). Plugins must reject paths
+  // that escape the root; unknown paths return NOT_FOUND.
+  string path = 1;
+  // ETag the browser already holds (from If-None-Match). When it
+  // matches, the plugin answers with header.not_modified and no data.
+  string if_none_match = 2;
+}
+
+message AssetChunk {
+  oneof part {
+    // Always the first message of the stream, sent exactly once.
+    AssetHeader header = 1;
+    // File contents, split across as many chunks as the plugin likes.
+    bytes data = 2;
+  }
+}
+
+message AssetHeader {
+  // MIME type, e.g. "text/javascript; charset=utf-8". Forwarded verbatim.
+  string content_type = 1;
+  // Strong validator for the file's current contents (quoted, as it
+  // appears in an HTTP ETag header).
+  string etag = 2;
+  // True when if_none_match matched etag; no data chunks follow.
+  bool not_modified = 3;
+}

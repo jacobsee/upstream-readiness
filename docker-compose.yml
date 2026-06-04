@@ -1,0 +1,104 @@
+# Local-dev infrastructure for upstream-readiness.
+#
+# Brings up:
+#   - Postgres 17, for the orchestrator's instances/workflows/runs store
+#   - Plugin-owned Postgres instances (generic-go-dep on 5433,
+#     upstream-rebase on 5434) - invisible to the orchestrator
+#   - Temporal server (auto-setup), for durable workflow execution
+#   - Temporal Web UI, on http://localhost:8233
+#
+# The orchestrator and plugin processes are not in here - run those
+# locally (`go run .`) so you can iterate without rebuilding images.
+#
+#   docker compose up -d
+#   PG_DSN="postgres://orchestrator:orchestrator@localhost:5432/orchestrator?sslmode=disable" \
+#   TEMPORAL_ADDRESS=localhost:7233 \
+#     go run ./orchestrator --workflows=./workflows
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: orchestrator
+      POSTGRES_DB: orchestrator
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  # generic-go-dep owns its own Postgres - plugin state is not visible
+  # to the orchestrator (load-bearing rule 1). Currently holds the
+  # per-(workflow_id, step_id) patch queue the workflow-step-config MFE
+  # writes and handleUpdate reads on Execute.
+  godep-postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: godep
+      POSTGRES_PASSWORD: godep
+      POSTGRES_DB: godep
+    ports:
+      - "5433:5432"
+    volumes:
+      - godep-postgres-data:/var/lib/postgresql/data
+
+  # upstream-rebase owns its own Postgres too: the commit table per run,
+  # captured conflicts, saved resolutions / decisions (reused across
+  # runs), the rerere cache, and its per-step patch queue.
+  rebase-postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: rebase
+      POSTGRES_PASSWORD: rebase
+      POSTGRES_DB: rebase
+    ports:
+      - "5434:5432"
+    volumes:
+      - rebase-postgres-data:/var/lib/postgresql/data
+
+  # Temporal uses its own Postgres instance so its schema is isolated
+  # from the orchestrator's. Bundling them is fine for dev; production
+  # should run separate clusters.
+  temporal-postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal-postgres-data:/var/lib/postgresql/data
+
+  temporal:
+    image: temporalio/auto-setup:1.28.0
+    depends_on:
+      - temporal-postgres
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    volumes:
+      # The auto-setup image references this file by path but no longer
+      # ships one by default; mount our own minimal (empty) config so
+      # Temporal falls back to built-in defaults for every setting.
+      - ./temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro
+    ports:
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.40.0
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:8233
+    ports:
+      - "8233:8080"
+
+volumes:
+  postgres-data:
+  godep-postgres-data:
+  rebase-postgres-data:
+  temporal-postgres-data:

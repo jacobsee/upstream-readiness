@@ -1,0 +1,5 @@
+# Minimal dev dynamic-config for the Temporal auto-setup image.
+# The image expects a file at config/dynamicconfig/development-sql.yaml;
+# if one isn't mounted, the server fails to start. An empty mapping is
+# valid YAML and tells Temporal to use built-in defaults for everything.
+{}

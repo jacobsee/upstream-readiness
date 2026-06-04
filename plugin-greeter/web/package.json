@@ -1,0 +1,22 @@
+{
+  "name": "@upstream/plugin-greeter-mfe",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build"
+  },
+  "peerDependencies": {
+    "@patternfly/react-core": "^6.5.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@patternfly/react-core": "^6.5.1",
+    "@vitejs/plugin-react": "^6.0.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "vite": "^8.0.0"
+  }
+}

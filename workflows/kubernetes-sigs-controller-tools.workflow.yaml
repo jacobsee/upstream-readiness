@@ -1,0 +1,24 @@
+id: controller-tools-rebase
+display_name: "OpenShift controller-tools Rebase"
+# schedule: "0 6 * * 1"
+
+steps:
+  - id: rebase-controller-tools
+    plugin: upstream-rebase
+    instance: ffd11c3a-d8c8-4ff4-84b9-c9131dd495d7
+    action: rebase
+    timeout: 4h
+    params:
+      clone_url: "https://github.com/openshift/kubernetes-sigs-controller-tools"
+      fork_branch: master
+      upstream_url: "https://github.com/kubernetes-sigs/controller-tools"
+      target_ref: main
+      previous_rebase_commit: "b31a773eaaa65a28718b9711aa646aba68a428cb"
+      # previous_rebase_commit: ""   # auto-detected; set to override
+      # rerere: suggest              # off | suggest | auto
+      # Same semantics as generic-go-dep's dirs. Runs after every commit
+      # has been re-applied. Generated commits are UPSTREAM: <drop>.
+
+      dirs:
+        - path: "."
+          # make_targets: [update]

@@ -1,0 +1,111 @@
+# upstream-rebase.workflow.yaml
+#
+# Demonstrates the chain end-to-end with the production design:
+#
+#   - One plugin process (generic-go-dep) serves the whole chain.
+#   - One plugin instance (github-acme-bot) carries the shared git
+#     identity, SSH key, and fork_url_template so the per-step params
+#     stay minimal.
+#   - The plugin clones the upstream (read-only) and pushes the new
+#     branch to a fork derived from the instance's template.
+#   - Each step lists one or more `dirs` - one per Go module directory
+#     inside the cloned repo. A step with a single-module repo uses
+#     `dirs: [{path: ".", updates: [...]}]`. Multi-module monorepos add
+#     more entries under different paths; each dir gets its own deps /
+#     vendor / make commits, all on the same branch.
+#   - A dir may bump MULTIPLE dependencies at once (see update-main-app,
+#     which fans in both lib-utils and lib-auth into a single commit).
+#   - Each entry in `updates` is independently subject to auto-replace:
+#     when target_version comes from an upstream step's `commit`
+#     output, the plugin inserts a `replace` directive pointing at
+#     that step's `fork_url` so `go mod tidy` can find the commit.
+#     The replace lives in the committed go.mod; reviewers drop it
+#     once the upstream PR merges. The orchestrator never sees any
+#     of this - it just threads outputs forward.
+#
+# Before running:
+#   1. Start the orchestrator and the plugin.
+#   2. Create a Go Dependency Updater instance with id "github-acme-bot"
+#      (the UI assigns a UUID, so either PUT /api/instances/github-acme-bot
+#      or create it in the UI and change `instance:` below). Fill in:
+#        - git_user_name / git_user_email
+#        - fork_url_template, e.g. git@github.com:acme-bot/{repo}.git
+#        - ssh_private_key (PEM contents)
+#        - ssh_known_hosts (recommended)
+#   3. Trigger the workflow from the Workflows sidebar.
+#
+# Dependency graph:
+#
+#   update-lib-core ──┬──► update-lib-utils ──┐
+#                     │                        ├──► update-main-app
+#                     └──► update-lib-auth  ──┘
+
+id: upstream-rebase
+display_name: "Example Rebase"
+# schedule: "0 6 * * 1"  # every Monday at 06:00 UTC
+
+steps:
+  - id: update-lib-core
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    params:
+      # Read-only clone target. The plugin never pushes here.
+      clone_url: "git@github.com:your-org/lib-core.git"
+      # push_url omitted; the instance's fork_url_template derives it.
+      dirs:
+        - path: "."
+          updates:
+            - dependency: "github.com/upstream-org/core"
+              target_version: "v2.0.0"
+
+  - id: update-lib-utils
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-lib-core]
+    params:
+      clone_url: "git@github.com:your-org/lib-utils.git"
+      dirs:
+        - path: "."
+          updates:
+            # Pin to the exact commit lib-core was bumped to. The plugin
+            # auto-adds a replace directive against update-lib-core's
+            # fork_url so `go mod tidy` can resolve the SHA.
+            - dependency: "github.com/your-org/lib-core"
+              target_version:
+                __ref: { step: update-lib-core, output: commit }
+
+  - id: update-lib-auth
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-lib-core]
+    params:
+      clone_url: "git@github.com:your-org/lib-auth.git"
+      dirs:
+        - path: "."
+          updates:
+            - dependency: "github.com/your-org/lib-core"
+              target_version:
+                __ref: { step: update-lib-core, output: commit }
+
+  - id: update-main-app
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-lib-utils, update-lib-auth]
+    params:
+      clone_url: "git@github.com:your-org/main-app.git"
+      dirs:
+        - path: "."
+          # Two bumps into one commit. Each is independently auto-replaced
+          # against its own upstream step's fork, so the resulting go.mod
+          # gets two replace directives - one per bumped module.
+          updates:
+            - dependency: "github.com/your-org/lib-utils"
+              target_version:
+                __ref: { step: update-lib-utils, output: commit }
+            - dependency: "github.com/your-org/lib-auth"
+              target_version:
+                __ref: { step: update-lib-auth, output: commit }

@@ -1,0 +1,14 @@
+# JS build artifacts
+node_modules/
+dist/
+*.log
+
+# Go binaries
+/orchestrator/orchestrator
+/plugin-greeter/plugin-greeter
+/plugin-generic-go-dep/plugin-generic-go-dep
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

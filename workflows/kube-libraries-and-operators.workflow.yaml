@@ -1,0 +1,109 @@
+# kube-rebase.workflow.yaml
+
+id: kube-rebase-test-more
+display_name: "Example Large Rebase"
+# schedule: "0 6 * * 1"  # every Monday at 06:00 UTC
+
+steps:
+  - id: update-api
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    params:
+      clone_url: "https://github.com/openshift/api"
+      dirs:
+        - path: "."
+          updates:
+            - dependency: "k8s.io/api"
+              target_version: "master"
+
+  - id: update-client-go
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-api]
+    params:
+      clone_url: "https://github.com/openshift/client-go"
+      dirs:
+        - path: "."
+          updates:
+            - dependency: "github.com/openshift/api"
+              target_version:
+                __ref: { step: update-api, output: commit }
+
+  - id: update-library-go
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-api, update-client-go]
+    params:
+      clone_url: "https://github.com/openshift/library-go"
+      dirs:
+        - path: "."
+          updates:
+            - dependency: "github.com/openshift/api"
+              target_version:
+                __ref: { step: update-api, output: commit }
+            - dependency: "github.com/openshift/client-go"
+              target_version:
+                __ref: { step: update-client-go, output: commit }
+
+  - id: update-apiserver-library-go
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-api, update-client-go, update-library-go]
+    params:
+      clone_url: "https://github.com/openshift/apiserver-library-go"
+      dirs:
+        - path: "."
+          updates:
+            - dependency: "github.com/openshift/api"
+              target_version:
+                __ref: { step: update-api, output: commit }
+            - dependency: "github.com/openshift/client-go"
+              target_version:
+                __ref: { step: update-client-go, output: commit }
+            - dependency: "github.com/openshift/library-go"
+              target_version:
+                __ref: { step: update-library-go, output: commit }
+
+  - id: update-apiserver-library-go-2
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-api, update-client-go, update-library-go]
+    params:
+      clone_url: "https://github.com/openshift/apiserver-library-go-2"
+      dirs:
+        - path: "."
+          updates:
+            - dependency: "github.com/openshift/api"
+              target_version:
+                __ref: { step: update-api, output: commit }
+            - dependency: "github.com/openshift/client-go"
+              target_version:
+                __ref: { step: update-client-go, output: commit }
+            - dependency: "github.com/openshift/library-go"
+              target_version:
+                __ref: { step: update-library-go, output: commit }
+
+  - id: update-kubernetes
+    plugin: generic-go-dep
+    instance: github-acme-bot
+    action: update
+    depends_on: [update-api, update-client-go, update-library-go]
+    params:
+      clone_url: "https://github.com/openshift/kubernetes"
+      dirs:
+        - path: "."
+          updates:
+            - dependency: "github.com/openshift/api"
+              target_version:
+                __ref: { step: update-api, output: commit }
+            - dependency: "github.com/openshift/client-go"
+              target_version:
+                __ref: { step: update-client-go, output: commit }
+            - dependency: "github.com/openshift/library-go"
+              target_version:
+                __ref: { step: update-library-go, output: commit }
