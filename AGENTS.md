@@ -117,13 +117,14 @@ proto/                       shared gRPC contract module (Buf-generated Go stubs
 orchestrator/                Go service; PatternFly shell; Temporal client + worker
 pluginkit/                   shared *plugin-side* Go + JSX: mfeassets (GetAsset, used by every
                              plugin) plus git-plugin mechanics (gitenv, refs, runner, godeps,
-                             patchqueue, cmdlog, execstream; web/src shared components)
+                             patchqueue, cmdlog, shellcmds, execstream; web/src shared components)
 plugin-greeter/              minimal example plugin (gRPC-only + Vite MFE served via GetAsset)
-plugin-generic-go-dep/       realistic example plugin: bumps a Go dep, force-pushes to fork
+plugin-generic-go-dep/       realistic example plugin: bumps a Go dep, runs the step's shell
+                             commands, force-pushes to fork
                              (owns its own Postgres for the per-step patch queue)
 plugin-upstream-rebase/      rebases a fork onto a new upstream tag (merge -s ours + re-pick
                              UPSTREAM commits), suspends for conflicts/decisions, then runs
-                             the godeps pipeline (owns its own Postgres on 5434)
+                             the godeps pipeline and shell commands (owns its own Postgres on 5434)
 workflows/                   *.yaml workflow files loaded on orchestrator startup; the only way to
                              define a workflow (a stored one whose file is gone is flagged removed)
 docker-compose.yml           orchestrator Postgres + plugin-owned Postgres + Temporal + Temporal Web UI
@@ -280,6 +281,7 @@ delivery:
 (cd pluginkit && go test ./mfeassets/)
 (cd orchestrator && go test ./internal/httpapi/)
 # Git mechanics against scratch repos (no services needed):
+(cd pluginkit && go test ./shellcmds/)
 (cd plugin-upstream-rebase && go test ./internal/gitrebase/)
 # Full rebase action (suspend → decide → conflict → resolve → resume →
 # push → reuse → next-release rebase) and the working-copy lifecycle

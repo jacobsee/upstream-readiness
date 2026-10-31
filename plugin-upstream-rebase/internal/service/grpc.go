@@ -29,6 +29,7 @@ import (
 	"github.com/jacobsee/upstream-readiness/pluginkit/godeps"
 	"github.com/jacobsee/upstream-readiness/pluginkit/mfeassets"
 	"github.com/jacobsee/upstream-readiness/pluginkit/patchqueue"
+	"github.com/jacobsee/upstream-readiness/pluginkit/shellcmds"
 	pluginpb "github.com/jacobsee/upstream-readiness/proto/gen/pluginsdk/v1"
 )
 
@@ -182,33 +183,7 @@ func validateStepRaw(payload []byte) []string {
 		errs = append(errs, godeps.ValidateRaw(dirsRaw, true, godeps.Options{AllowNoUpdates: true})...)
 	}
 	if cmdsRaw, present := raw["commands"]; present {
-		errs = append(errs, validateCommandsRaw(cmdsRaw)...)
-	}
-	return errs
-}
-
-func validateCommandsRaw(cmdsRaw any) []string {
-	cmds, ok := cmdsRaw.([]any)
-	if !ok {
-		return []string{"commands must be a list of {name, run, dir?} entries"}
-	}
-	var errs []string
-	for i, c := range cmds {
-		m, ok := c.(map[string]any)
-		if !ok {
-			errs = append(errs, fmt.Sprintf("commands[%d] must be an object", i))
-			continue
-		}
-		for _, k := range []string{"name", "run"} {
-			if _, ok := m[k]; !ok {
-				errs = append(errs, fmt.Sprintf("commands[%d].%s is required", i, k))
-			}
-		}
-		if d, ok := m["dir"].(string); ok {
-			if perr := gitenv.CheckModuleDir(d); perr != "" {
-				errs = append(errs, fmt.Sprintf("commands[%d].dir %s", i, perr))
-			}
-		}
+		errs = append(errs, shellcmds.ValidateRaw(cmdsRaw)...)
 	}
 	return errs
 }

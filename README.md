@@ -580,6 +580,39 @@ Where they live:
   ad-hoc `action` MFE), so testing a bump in the plugin's own runtime
   UI never picks up a per-workflow queue that wasn't asked for.
 
+### Shell commands (`generic-go-dep`, `upstream-rebase`)
+
+Both git plugins accept an optional `commands` list in their step
+params, so a workflow can run arbitrary repo scripts (code generators,
+`hack/update-*.sh`, …) as part of the step:
+
+```yaml
+commands:
+  - name: regenerate openapi           # required; single line, becomes the commit subject
+    run: "hack/update-openapi-spec.sh" # required; handed to `sh -c`
+    dir: "."                           # optional; relative to the repo root, default "."
+```
+
+Shared code is in `pluginkit/shellcmds`. The commands run in order,
+after everything else the step commits (every dir's bumps / vendor /
+patch queue / make targets) and before the push. Each `run` goes
+through `sh -c` in `dir` on the recorded runner, so it appears in the
+command history like any other command. Whatever a command changes is
+committed on its own, with `$ <run>` in the commit body. A command that
+leaves the tree unchanged gets no commit. A non-zero exit fails the
+step. `dir` follows the same rules as a `dirs[].path` (relative, no
+`..`). Any value may be a `__ref` marker.
+
+Commit subjects carry each plugin's usual prefix:
+
+| Plugin | Subject |
+|---|---|
+| `generic-go-dep` | `chore: <name>` / `chore(<dir>): <name>` |
+| `upstream-rebase` | `UPSTREAM: <drop>: <name>` / `UPSTREAM: <drop>: (<dir>) <name>` |
+
+`commands` is edited in the workflow YAML only. The ad-hoc action
+panels don't expose it.
+
 ### Command history (`generic-go-dep`, `upstream-rebase`)
 
 Progress events carry only the last ~4KB of the command log
@@ -714,7 +747,8 @@ plugin never guesses.
    `updates` may be empty here (e.g. just `make update`).
 9. **Shell commands.** Each `commands` entry (`{name, run, dir?}`) runs
    in order, after every dir's pipeline, so it comes after every other
-   commit the plugin makes. `run` goes through `sh -c` in `dir`
+   commit the plugin makes (`pluginkit/shellcmds`, see *Shell commands*
+   above). `run` goes through `sh -c` in `dir`
    (relative to the repo root, default `"."`), and the recorded runner
    captures it like any other command. Any changes are committed on
    their own as `UPSTREAM: <drop>: [(dir) ]<name>`, with the command in
@@ -1083,6 +1117,7 @@ pluginkit/                                   shared plugin-side code (not orches
   runner/                                    command runner: progress emit, bounded log tail, Recorder hook for every exec
   godeps/                                    per-dir bump → tidy → vendor → AfterVendor hook → make pipeline
   patchqueue/                                step_patches schema/queries, patches_* handlers, ApplyPatch
+  shellcmds/                                 step `commands`: validation, sh -c per entry, one commit each
   cmdlog/                                    command_log schema/queries, runner.Recorder, cmdlog_* handlers
   execstream/                                SendFinalJSON / SendSuspendJSON helpers
   web/src/                                   shared JSX: instance form, field helpers, LogTail, PatchQueueEditor, CommandHistory
@@ -1446,6 +1481,12 @@ steps:
           updates:
             - dependency: "github.com/upstream-org/core"
               target_version: "v2.0.0"
+      # Optional bare shell commands, run in order after every dir's
+      # pipeline; each one's changes land in their own commit.
+      # commands:
+      #   - name: regenerate mocks
+      #     run: "go generate ./..."
+      #     dir: "."                             # optional, relative to the repo root
 
   - id: update-main-app
     plugin: generic-go-dep
