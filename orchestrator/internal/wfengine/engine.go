@@ -70,12 +70,113 @@ func (e *Engine) Stop() {
 	}
 }
 
-// TriggerRun starts a workflow execution. It allocates a run ID, loads
-// the instance configs the workflow references from Postgres, opens a
-// run_summaries row in "running" status, and schedules the Temporal
-// workflow. The Temporal workflow's PersistResult activity closes the
-// summary when it finishes.
-func (e *Engine) TriggerRun(ctx context.Context, def workflow.Definition) (string, error) {
+// ErrRunRejected wraps every reason TriggerRun / RerunFrom refuse to
+// start a run because of what the caller asked for (bad inputs, a rerun
+// whose reused steps didn't succeed, ...). Nothing was started.
+var ErrRunRejected = errors.New("run rejected")
+
+// ErrRerunSourceBusy is returned by RerunFrom when the source run is
+// still in flight.
+var ErrRerunSourceBusy = errors.New("source run is not finished")
+
+// TriggerRun starts a workflow execution with the supplied run inputs
+// (checked and defaulted against the workflow's declarations).
+func (e *Engine) TriggerRun(ctx context.Context, def workflow.Definition, inputs map[string]string) (string, error) {
+	resolved, err := workflow.ResolveInputs(def, inputs)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrRunRejected, err)
+	}
+	return e.startRun(ctx, def, storage.RunSummary{Inputs: resolved}, nil)
+}
+
+// RerunFrom starts a new run of def that executes fromStep and every step
+// downstream of it, and carries every other step over from sourceRunID:
+// those steps are not executed, and their stored outputs feed their
+// dependents exactly as if they had just run. Each carried-over step must
+// have succeeded (or itself been carried over) in the source run. When
+// inputs is nil the source run's inputs are used.
+func (e *Engine) RerunFrom(ctx context.Context, def workflow.Definition, sourceRunID, fromStep string, inputs map[string]string) (string, error) {
+	src, err := e.GetRunStatus(ctx, sourceRunID)
+	if err != nil {
+		return "", err
+	}
+	if src == nil || src.WorkflowID != def.ID {
+		return "", fmt.Errorf("%w: workflow %q has no run %q", ErrRunRejected, def.ID, sourceRunID)
+	}
+	if src.Status == "running" {
+		return "", fmt.Errorf("%w: run %q is still running", ErrRerunSourceBusy, sourceRunID)
+	}
+	_, reuse, err := workflow.RerunPlan(def, fromStep)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrRunRejected, err)
+	}
+	if inputs == nil {
+		// Carry over the source run's values for the inputs the current
+		// definition still declares; new ones take their defaults.
+		inputs = map[string]string{}
+		for _, in := range def.Inputs {
+			if v, ok := src.Inputs[in.Name]; ok {
+				inputs[in.Name] = v
+			}
+		}
+	}
+	resolved, err := workflow.ResolveInputs(def, inputs)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrRunRejected, err)
+	}
+
+	srcSteps, err := e.store.ListStepsForRun(ctx, sourceRunID)
+	if err != nil {
+		return "", err
+	}
+	byID := make(map[string]storage.StepRecord, len(srcSteps))
+	for _, s := range srcSteps {
+		byID[s.StepID] = s
+	}
+	stepDefs := make(map[string]workflow.Step, len(def.Steps))
+	for _, s := range def.Steps {
+		stepDefs[s.ID] = s
+	}
+	// A reused step that was itself reused points at the run that
+	// actually executed it.
+	origin := func(s storage.StepRecord) string {
+		if s.ReusedFrom != "" {
+			return s.ReusedFrom
+		}
+		return sourceRunID
+	}
+	var bad []string
+	reused := make([]storage.StepRecord, 0, len(reuse))
+	for _, id := range reuse {
+		s, ok := byID[id]
+		if !ok || !workflow.StepSucceeded(s.Status) {
+			status := "not run"
+			if ok {
+				status = s.Status
+			}
+			bad = append(bad, fmt.Sprintf("%s (%s)", id, status))
+			continue
+		}
+		reused = append(reused, storage.StepRecord{
+			StepID: id, Plugin: stepDefs[id].Plugin, Action: stepDefs[id].Action,
+			Status: workflow.StepReused, Outputs: s.Outputs, ReusedFrom: origin(s),
+		})
+	}
+	if len(bad) > 0 {
+		return "", fmt.Errorf("%w: rerunning from %q reuses steps that did not succeed in run %q: %s",
+			ErrRunRejected, fromStep, sourceRunID, strings.Join(bad, ", "))
+	}
+	return e.startRun(ctx, def, storage.RunSummary{
+		Inputs: resolved, RerunOf: sourceRunID, RerunFromStep: fromStep,
+	}, reused)
+}
+
+// startRun allocates a run ID, loads the instance configs the workflow
+// references from Postgres, opens a run_summaries row in "running"
+// status (with any reused steps), and schedules the Temporal workflow.
+// The Temporal workflow's PersistResult activity closes the summary
+// when it finishes. run carries the inputs and rerun lineage.
+func (e *Engine) startRun(ctx context.Context, def workflow.Definition, run storage.RunSummary, reused []storage.StepRecord) (string, error) {
 	if err := workflow.ValidateShape(def); err != nil {
 		return "", err
 	}
@@ -96,24 +197,41 @@ func (e *Engine) TriggerRun(ctx context.Context, def workflow.Definition) (strin
 	}
 
 	runID := fmt.Sprintf("%s-%d", def.ID, time.Now().UnixMilli())
-	if err := e.store.StartRun(ctx, storage.RunSummary{
-		RunID:      runID,
-		WorkflowID: def.ID,
-		Status:     "running",
-		StartedAt:  time.Now().UTC(),
-	}); err != nil {
+	run.RunID = runID
+	run.WorkflowID = def.ID
+	run.Status = "running"
+	run.StartedAt = time.Now().UTC()
+	if err := e.store.StartRun(ctx, run, reused); err != nil {
 		return "", fmt.Errorf("start run summary: %w", err)
+	}
+
+	input := TriggerInput{
+		RunID:           runID,
+		Definition:      def,
+		InstanceConfigs: configs,
+		Inputs:          run.Inputs,
+	}
+	if len(reused) > 0 {
+		input.Reused = make(map[string]map[string]json.RawMessage, len(reused))
+		input.ReusedFrom = run.RerunOf
+		for _, s := range reused {
+			// The orchestrator's own envelope (output name → value); the
+			// values stay opaque.
+			var outs map[string]json.RawMessage
+			if len(s.Outputs) > 0 {
+				if err := json.Unmarshal(s.Outputs, &outs); err != nil {
+					return "", fmt.Errorf("outputs of reused step %q: %w", s.StepID, err)
+				}
+			}
+			input.Reused[s.StepID] = outs
+		}
 	}
 
 	wfOpts := client.StartWorkflowOptions{
 		ID:        runID,
 		TaskQueue: TaskQueue,
 	}
-	if _, err := e.client.ExecuteWorkflow(ctx, wfOpts, ExecuteWorkflow, TriggerInput{
-		RunID:           runID,
-		Definition:      def,
-		InstanceConfigs: configs,
-	}); err != nil {
+	if _, err := e.client.ExecuteWorkflow(ctx, wfOpts, ExecuteWorkflow, input); err != nil {
 		// Mark the summary failed so the UI doesn't show a ghost
 		// "running" forever.
 		_ = e.store.FinishRun(ctx, runID, "failed", time.Now().UTC(), mustJSON(map[string]string{"error": err.Error()}))
@@ -172,10 +290,17 @@ func (e *Engine) EnsureSchedules(ctx context.Context, defs []workflow.Definition
 			}
 			configs[instID] = inst.ConfigBlob
 		}
+		// ValidateShape guarantees a scheduled workflow has no required
+		// input without a default, so this only fills defaults.
+		inputs, err := workflow.ResolveInputs(def, nil)
+		if err != nil {
+			return fmt.Errorf("scheduled workflow %q inputs: %w", def.ID, err)
+		}
 		input := TriggerInput{
 			RunID:           "", // ExecuteWorkflow uses the fire's workflow ID
 			Definition:      def,
 			InstanceConfigs: configs,
+			Inputs:          inputs,
 		}
 		action := &client.ScheduleWorkflowAction{
 			// Temporal appends the scheduled time ("-2026-10-08T06:00:00Z"),
@@ -409,7 +534,7 @@ func (e *Engine) GetRunStatus(ctx context.Context, runID string) (*storage.RunSu
 			for _, s := range steps {
 				sr := workflow.StepResult{
 					StepID: s.StepID, Plugin: s.Plugin, Action: s.Action,
-					Status: s.Status, Error: s.Error,
+					Status: s.Status, Error: s.Error, ReusedFrom: s.ReusedFrom,
 				}
 				if len(s.Outputs) > 0 {
 					var outs map[string]json.RawMessage

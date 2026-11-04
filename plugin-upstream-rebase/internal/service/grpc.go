@@ -159,8 +159,8 @@ func (s *Rebaser) Validate(_ context.Context, req *pluginpb.ValidateRequest) (*p
 	}
 }
 
-// validateStepRaw checks key presence only - values may still be __ref
-// markers at edit time.
+// validateStepRaw checks key presence only - values may still be __ref /
+// __input markers at edit time.
 func validateStepRaw(payload []byte) []string {
 	var raw map[string]any
 	if len(payload) > 0 {

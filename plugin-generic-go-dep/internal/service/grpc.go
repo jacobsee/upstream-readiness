@@ -153,7 +153,8 @@ func (g *GoDepUpdater) Describe(_ context.Context, _ *pluginpb.DescribeRequest) 
 }
 
 // stepParams is the shape the plugin's per-action UI produces. Opaque
-// to the orchestrator. Any leaf value may be an {"__ref": {...}} marker.
+// to the orchestrator. Any leaf value may be an {"__ref": {...}} or
+// {"__input": "NAME"} marker.
 //
 // A step operates on one cloned repo but may bump modules in multiple
 // directories inside it - that's what `Dirs` enumerates. Each dir
@@ -257,7 +258,7 @@ func validateInstance(payload []byte) *pluginpb.ValidateResponse {
 }
 
 func validateStep(payload []byte) *pluginpb.ValidateResponse {
-	// Step params may contain unresolved __ref markers at edit time, so
+	// Step params may contain unresolved __ref / __input markers at edit time, so
 	// only check for key presence, not value types.
 	var raw map[string]any
 	if len(payload) > 0 {
@@ -302,7 +303,10 @@ func (g *GoDepUpdater) handleUpdate(ctx context.Context, req *pluginpb.ExecuteRe
 		}
 	}
 
-	resolved, err := refs.ResolveRefs(req.GetPayload(), req.GetUpstreamOutputs())
+	if err := gitenv.CheckRunInputs(req.GetRunInputs()); err != nil {
+		return err
+	}
+	resolved, err := refs.ResolveRefs(req.GetPayload(), req.GetUpstreamOutputs(), req.GetRunInputs())
 	if err != nil {
 		return fmt.Errorf("resolve upstream references: %w", err)
 	}
@@ -355,7 +359,7 @@ func (g *GoDepUpdater) handleUpdate(ctx context.Context, req *pluginpb.ExecuteRe
 	if g.Store != nil {
 		rec = cmdlog.NewRecorder(ctx, g.Store.Commands, req)
 	}
-	result, err := runUpdate(ctx, g.WorkRoot, rec, cfg, p, pushURL, dirAutoReplaces, patchesByDir, stream)
+	result, err := runUpdate(ctx, g.WorkRoot, rec, cfg, p, req.GetRunInputs(), pushURL, dirAutoReplaces, patchesByDir, stream)
 	if err != nil {
 		return err
 	}
@@ -385,7 +389,7 @@ func (g *GoDepUpdater) handleUpdate(ctx context.Context, req *pluginpb.ExecuteRe
 	})
 }
 
-func runUpdate(ctx context.Context, workRoot string, rec *cmdlog.Recorder, cfg gitenv.InstanceConfig, p stepParams, pushURL string, dirAutoReplaces [][]*refs.AutoReplaceDirective, patchesByDir map[string][]patchqueue.Patch, stream pluginpb.Plugin_ExecuteServer) (*updateResult, error) {
+func runUpdate(ctx context.Context, workRoot string, rec *cmdlog.Recorder, cfg gitenv.InstanceConfig, p stepParams, runInputs map[string]string, pushURL string, dirAutoReplaces [][]*refs.AutoReplaceDirective, patchesByDir map[string][]patchqueue.Patch, stream pluginpb.Plugin_ExecuteServer) (*updateResult, error) {
 	dir, err := os.MkdirTemp(workRoot, "update-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
@@ -411,13 +415,14 @@ func runUpdate(ctx context.Context, workRoot string, rec *cmdlog.Recorder, cfg g
 	// to forks on a different origin, and different updates may point
 	// at different forks.
 	hosts := append([]string{gitenv.GitHost(p.CloneURL), gitenv.GitHost(pushURL)}, godeps.ForkHosts(dirAutoReplaces)...)
-	env, err := gitenv.BuildGitEnv(dir, gopathDir, cfg, hosts)
+	env, err := gitenv.BuildGitEnv(dir, gopathDir, cfg, hosts, runInputs)
 	if err != nil {
 		return nil, err
 	}
 
 	r := runner.New(ctx, env, func(phase, message, log string) { emit(stream, phase, message, log) })
 	rec.Attach(r)
+	r.NoteRunInputs(runInputs)
 
 	emit(stream, "cloning", "git clone "+p.CloneURL, r.Tail())
 	if err := r.Run(repoDir, "git", "clone", p.CloneURL, "."); err != nil {

@@ -18,7 +18,24 @@ type Definition struct {
 	// orchestrator registers a Temporal Schedule that triggers this
 	// workflow at the cron cadence.
 	Schedule string `yaml:"schedule,omitempty" json:"schedule,omitempty"`
-	Steps    []Step `yaml:"steps"              json:"steps"`
+	// Run inputs the workflow accepts. Each run carries one string value
+	// per declared input; every step receives them as
+	// ExecuteRequest.run_inputs. Orchestrator-owned (unlike step params).
+	Inputs []InputDecl `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+	Steps  []Step      `yaml:"steps"            json:"steps"`
+}
+
+// InputDecl declares one run input. Values are strings; the name is an
+// environment-variable-style identifier so plugins can export it as-is.
+type InputDecl struct {
+	Name        string `yaml:"name"                  json:"name"`
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	// Default fills the input when a run doesn't supply it. Scheduled
+	// runs always use the defaults.
+	Default *string `yaml:"default,omitempty" json:"default,omitempty"`
+	// Required inputs must be supplied (non-empty) on every run. A
+	// required input can't also have a default.
+	Required bool `yaml:"required,omitempty" json:"required,omitempty"`
 }
 
 // Step is one node in the workflow DAG.
@@ -71,9 +88,21 @@ type StepResult struct {
 	StepID  string                     `json:"step_id"`
 	Plugin  string                     `json:"plugin"`
 	Action  string                     `json:"action"`
-	Status  string                     `json:"status"` // pending | running | awaiting_resolution | succeeded | failed | skipped | cancelled
+	Status  string                     `json:"status"` // pending | running | awaiting_resolution | succeeded | reused | failed | skipped | cancelled
 	Error   string                     `json:"error,omitempty"`
 	Outputs map[string]json.RawMessage `json:"outputs,omitempty"`
+	// ReusedFrom is the run whose outputs a "reused" step carries over.
+	ReusedFrom string `json:"reused_from,omitempty"`
+}
+
+// StepReused is the status of a step a rerun did not execute: its
+// outputs were copied from an earlier run. It counts as a success.
+const StepReused = "reused"
+
+// StepSucceeded reports whether status is a successful terminal step
+// status (ran and succeeded, or reused from an earlier run).
+func StepSucceeded(status string) bool {
+	return status == "succeeded" || status == StepReused
 }
 
 // RunResult is the JSON shape the orchestrator's HTTP API returns for a

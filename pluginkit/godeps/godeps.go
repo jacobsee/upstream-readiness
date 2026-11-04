@@ -87,7 +87,7 @@ type Options struct {
 
 // ValidateRaw checks a still-unresolved params `dirs` value (as decoded
 // into `any`) for shape problems. Step params may contain unresolved
-// __ref markers at edit time, so only key presence is checked, not
+// __ref / __input markers at edit time, so only key presence is checked, not
 // value types. Returns human-readable errors.
 func ValidateRaw(dirsRaw any, present bool, opts Options) []string {
 	var errs []string

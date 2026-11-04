@@ -32,6 +32,7 @@ import {
 } from "@patternfly/react-core";
 import WorkflowGraph from "./WorkflowGraph.jsx";
 import PluginPanel from "./PluginPanel.jsx";
+import RunLaunchModal, { initialInputs, rerunPlan } from "./RunLaunchModal.jsx";
 
 // Single-workflow detail view. Fetches the workflow's run history, opens
 // an SSE stream to the currently-selected run so the DAG and per-step
@@ -47,6 +48,9 @@ export default function WorkflowsView({ workflow, plugins, onPurged }) {
   const [runError, setRunError] = useState(null);
   const [triggering, setTriggering] = useState(false);
   const [openStepID, setOpenStepID] = useState(null);
+  // launch: null, { kind: "run" }, or { kind: "rerun", fromStep, plan,
+  // sourceRunID, sourceInputs } while the RunLaunchModal is open.
+  const [launch, setLaunch] = useState(null);
   const esRef = useRef(null);
 
   const pluginById = useMemo(
@@ -194,18 +198,37 @@ export default function WorkflowsView({ workflow, plugins, onPurged }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRunID]);
 
+  // POST a run-starting request and select the new run. Throws on
+  // failure so the launch modal can show the error.
+  const startRun = async (url, body) => {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`${r.status}: ${txt}`);
+    }
+    const { run_id } = await r.json();
+    setLaunch(null);
+    await loadRuns();
+    setSelectedRunID(run_id);
+  };
+
+  const runURL = `/api/workflows/${encodeURIComponent(workflow.id)}/run`;
+
+  // A workflow with declared inputs asks for them first; one without
+  // starts right away.
   const handleRun = async () => {
+    if ((workflow.inputs ?? []).length > 0) {
+      setLaunch({ kind: "run" });
+      return;
+    }
     setTriggering(true);
     setRunError(null);
     try {
-      const r = await fetch(`/api/workflows/${encodeURIComponent(workflow.id)}/run`, { method: "POST" });
-      if (!r.ok) {
-        const txt = await r.text();
-        throw new Error(`${r.status}: ${txt}`);
-      }
-      const body = await r.json();
-      await loadRuns();
-      setSelectedRunID(body.run_id);
+      await startRun(runURL, {});
     } catch (e) {
       setRunError(String(e));
     } finally {
@@ -256,11 +279,23 @@ export default function WorkflowsView({ workflow, plugins, onPurged }) {
         status: rec?.status ?? "pending",
         error: rec?.error,
         outputs: rec?.outputs,
+        reused_from: rec?.reused_from,
       };
     });
   }, [snapshot, workflow.steps]);
 
   const selectedSummary = runs?.find((r) => r.run_id === selectedRunID) ?? snapshot?.summary;
+  const runFinished = Boolean(selectedSummary) && selectedSummary.status !== "running" && !removed;
+  // The rerun plan from a step, or null when it can't be rerun because a
+  // step it would reuse didn't succeed in the selected run.
+  const rerunFrom = (stepId) => {
+    const plan = rerunPlan(workflow.steps ?? [], stepId);
+    const ok = plan.reuse.every((id) => {
+      const st = snapshot?.stepsByID[id]?.status;
+      return st === "succeeded" || st === "reused";
+    });
+    return ok ? plan : null;
+  };
   const runningSteps = (workflow.steps ?? []).filter((s) => snapshot?.stepsByID[s.id]?.status === "running");
   const awaitingSteps = (workflow.steps ?? []).filter((s) => snapshot?.stepsByID[s.id]?.status === "awaiting_resolution");
   const stepDefByID = Object.fromEntries((workflow.steps ?? []).map((s) => [s.id, s]));
@@ -508,6 +543,10 @@ export default function WorkflowsView({ workflow, plugins, onPurged }) {
               </Split>
             </CardTitle>
             <CardBody>
+              <RunInfo
+                summary={selectedSummary}
+                onSelectRun={runs?.some((r) => r.run_id === selectedSummary.rerun_of) ? setSelectedRunID : null}
+              />
               {stepsForGraph.length === 0 ? (
                 <p style={{ color: "#6a6e73", margin: 0 }}>
                   {selectedSummary.status === "running"
@@ -524,15 +563,43 @@ export default function WorkflowsView({ workflow, plugins, onPurged }) {
                           <SplitItem>
                             <Label color={stepColor(s.status)} isCompact>{s.status}</Label>
                           </SplitItem>
+                          {runFinished && (() => {
+                            const plan = rerunFrom(s.step_id);
+                            return (
+                              <SplitItem>
+                                <Button
+                                  variant="link"
+                                  isInline
+                                  size="sm"
+                                  isDisabled={!plan}
+                                  title={plan ? undefined : "A step this would reuse did not succeed in this run"}
+                                  onClick={() => setLaunch({
+                                    kind: "rerun",
+                                    fromStep: s.step_id,
+                                    plan,
+                                    sourceRunID: selectedSummary.run_id,
+                                    sourceInputs: selectedSummary.inputs ?? {},
+                                  })}
+                                >
+                                  Rerun from here
+                                </Button>
+                              </SplitItem>
+                            );
+                          })()}
                         </Split>
                       </DescriptionListTerm>
                       <DescriptionListDescription>
+                        {s.reused_from && (
+                          <div style={{ fontSize: 12, color: "#6a6e73" }}>
+                            Not executed; outputs from <code>{s.reused_from}</code>
+                          </div>
+                        )}
                         {s.error && (
                           <Alert variant="danger" isInline isPlain title="Error">
                             <code style={{ whiteSpace: "pre-wrap" }}>{s.error}</code>
                           </Alert>
                         )}
-                        {s.status !== "running" && s.status !== "pending" &&
+                        {s.status !== "running" && s.status !== "pending" && s.status !== "reused" &&
                           hasSlot(pluginById[s.plugin], "step-runtime") && stepDefByID[s.step_id] && (
                           <ExpandableSection toggleText="Details">
                             <PluginPanel
@@ -599,6 +666,30 @@ export default function WorkflowsView({ workflow, plugins, onPurged }) {
           ) : null}
         </ModalBody>
       </Modal>
+
+      {launch?.kind === "run" && (
+        <RunLaunchModal
+          workflow={workflow}
+          title={`Run ${workflow.display_name || workflow.id}`}
+          startValues={initialInputs(workflow.inputs, null)}
+          onSubmit={(inputs) => startRun(runURL, { inputs })}
+          onClose={() => setLaunch(null)}
+        />
+      )}
+      {launch?.kind === "rerun" && (
+        <RunLaunchModal
+          workflow={workflow}
+          title={`Rerun from ${launch.fromStep}`}
+          plan={launch.plan}
+          sourceRunID={launch.sourceRunID}
+          startValues={initialInputs(workflow.inputs, launch.sourceInputs)}
+          onSubmit={(inputs) => startRun(
+            `/api/runs/${encodeURIComponent(launch.sourceRunID)}/rerun`,
+            { from_step: launch.fromStep, inputs },
+          )}
+          onClose={() => setLaunch(null)}
+        />
+      )}
 
       {purgeOpen && (
         <PurgeModal
@@ -707,8 +798,47 @@ function statusColor(s) {
   return "grey";
 }
 
+// RunInfo shows a run's inputs and, for a rerun, where it came from.
+// onSelectRun, when set, makes the source run a link.
+export function RunInfo({ summary, onSelectRun }) {
+  const inputs = Object.entries(summary.inputs ?? {});
+  if (!summary.rerun_of && inputs.length === 0) return null;
+  return (
+    <DescriptionList isCompact isHorizontal style={{ marginBottom: 16 }}>
+      {summary.rerun_of && (
+        <DescriptionListGroup>
+          <DescriptionListTerm>Rerun of</DescriptionListTerm>
+          <DescriptionListDescription>
+            {onSelectRun ? (
+              <Button variant="link" isInline onClick={() => onSelectRun(summary.rerun_of)}>
+                <code style={{ fontSize: 12 }}>{summary.rerun_of}</code>
+              </Button>
+            ) : (
+              <code style={{ fontSize: 12 }}>{summary.rerun_of}</code>
+            )}{" "}
+            from step <code>{summary.rerun_from_step}</code>
+          </DescriptionListDescription>
+        </DescriptionListGroup>
+      )}
+      {inputs.length > 0 && (
+        <DescriptionListGroup>
+          <DescriptionListTerm>Inputs</DescriptionListTerm>
+          <DescriptionListDescription>
+            {inputs.map(([k, v]) => (
+              <div key={k}>
+                <code>{k}</code> = <code>{v === "" ? '""' : v}</code>
+              </div>
+            ))}
+          </DescriptionListDescription>
+        </DescriptionListGroup>
+      )}
+    </DescriptionList>
+  );
+}
+
 function stepColor(s) {
   if (s === "succeeded") return "green";
+  if (s === "reused") return "teal";
   if (s === "failed") return "red";
   if (s === "skipped") return "orange";
   if (s === "cancelled") return "grey";

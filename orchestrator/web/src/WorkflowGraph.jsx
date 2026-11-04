@@ -85,7 +85,9 @@ const STATUS = {
   // Suspended, waiting for the plugin's "resolution" slot to answer.
   awaiting_resolution: { fill: "#fdf7e7", stroke: "#b98412", label: "#1a1a1a" },
   succeeded: { fill: "#f0f9f0", stroke: "#1e8517", label: "#1a1a1a" },
-  failed:    { fill: "#faeae8", stroke: "#c9190b", label: "#1a1a1a" },
+  // Carried over from an earlier run by a rerun; not executed.
+  reused:    { fill: "#f0f9f0", stroke: "#1e8517", label: "#6a6e73", dashed: true },
+  failed:   { fill: "#faeae8", stroke: "#c9190b", label: "#1a1a1a" },
   skipped:   { fill: "#fff8e7", stroke: "#f0ab00", label: "#1a1a1a" },
   cancelled: { fill: "#f0f0f0", stroke: "#6a6e73", label: "#6a6e73" },
 };
@@ -188,6 +190,7 @@ export default function WorkflowGraph({ workflow, run, onStepClick, isStepEditab
               width={NODE_W} height={NODE_H} rx={6}
               fill={s.fill} stroke={s.stroke}
               strokeWidth={hovered ? 2.5 : 1.5}
+              strokeDasharray={s.dashed ? "5 3" : undefined}
               style={hovered ? { filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.18))" } : undefined}
             />
             {/* Step ID */}

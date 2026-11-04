@@ -52,10 +52,11 @@ type yamlStep struct {
 }
 
 type yamlDef struct {
-	ID          string     `yaml:"id"`
-	DisplayName string     `yaml:"display_name"`
-	Schedule    string     `yaml:"schedule,omitempty"`
-	Steps       []yamlStep `yaml:"steps"`
+	ID          string      `yaml:"id"`
+	DisplayName string      `yaml:"display_name"`
+	Schedule    string      `yaml:"schedule,omitempty"`
+	Inputs      []InputDecl `yaml:"inputs,omitempty"`
+	Steps       []yamlStep  `yaml:"steps"`
 }
 
 func loadFile(path string) (*Definition, error) {
@@ -74,6 +75,7 @@ func loadFile(path string) (*Definition, error) {
 		ID:          raw.ID,
 		DisplayName: raw.DisplayName,
 		Schedule:    raw.Schedule,
+		Inputs:      raw.Inputs,
 		Steps:       make([]Step, 0, len(raw.Steps)),
 	}
 	for _, ys := range raw.Steps {

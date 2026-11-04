@@ -1,7 +1,11 @@
-// Package refs resolves the {"__ref": {"step": "...", "output": "..."}}
-// marker objects the repo's plugins accept anywhere in their step
-// params, against the upstream_outputs the orchestrator threads in. The
-// orchestrator never parses any of this; the plugin does the
+// Package refs resolves the marker objects the repo's plugins accept
+// anywhere in their step params:
+//
+//	{"__ref": {"step": "...", "output": "..."}}  an upstream step's output
+//	{"__input": "NAME"}                           a run input (string)
+//
+// against the upstream_outputs and run_inputs the orchestrator threads
+// in. The orchestrator never parses any of this; the plugin does the
 // substitution on Execute.
 package refs
 
@@ -13,10 +17,11 @@ import (
 	pluginpb "github.com/jacobsee/upstream-readiness/proto/gen/pluginsdk/v1"
 )
 
-// ResolveRefs walks the opaque params blob and replaces every
-// {"__ref": {"step": "...", "output": "..."}} object with the JSON value
-// the named upstream output produced. Missing references are an error.
-func ResolveRefs(payload []byte, upstream map[string]*pluginpb.StepOutputs) ([]byte, error) {
+// ResolveRefs walks the opaque params blob and replaces every __ref
+// object with the JSON value the named upstream output produced, and
+// every __input object with the named run input's string value. Missing
+// references are an error.
+func ResolveRefs(payload []byte, upstream map[string]*pluginpb.StepOutputs, inputs map[string]string) ([]byte, error) {
 	if len(payload) == 0 {
 		return []byte(`{}`), nil
 	}
@@ -24,41 +29,62 @@ func ResolveRefs(payload []byte, upstream map[string]*pluginpb.StepOutputs) ([]b
 	if err := json.Unmarshal(payload, &v); err != nil {
 		return nil, err
 	}
-	resolved, err := resolveValue(v, upstream)
+	r := resolver{upstream: upstream, inputs: inputs}
+	resolved, err := r.value(v)
 	if err != nil {
 		return nil, err
 	}
 	return json.Marshal(resolved)
 }
 
-func resolveValue(v any, upstream map[string]*pluginpb.StepOutputs) (any, error) {
+type resolver struct {
+	upstream map[string]*pluginpb.StepOutputs
+	inputs   map[string]string
+}
+
+func (r resolver) value(v any) (any, error) {
 	switch t := v.(type) {
 	case map[string]any:
 		if ref, ok := t["__ref"]; ok && len(t) == 1 {
-			return resolveRef(ref, upstream)
+			return resolveRef(ref, r.upstream)
+		}
+		if name, ok := t["__input"]; ok && len(t) == 1 {
+			return resolveInput(name, r.inputs)
 		}
 		out := make(map[string]any, len(t))
 		for k, val := range t {
-			r, err := resolveValue(val, upstream)
+			res, err := r.value(val)
 			if err != nil {
 				return nil, err
 			}
-			out[k] = r
+			out[k] = res
 		}
 		return out, nil
 	case []any:
 		out := make([]any, len(t))
 		for i, val := range t {
-			r, err := resolveValue(val, upstream)
+			res, err := r.value(val)
 			if err != nil {
 				return nil, err
 			}
-			out[i] = r
+			out[i] = res
 		}
 		return out, nil
 	default:
 		return v, nil
 	}
+}
+
+func resolveInput(name any, inputs map[string]string) (any, error) {
+	s, ok := name.(string)
+	if !ok || s == "" {
+		return nil, fmt.Errorf("__input must be a non-empty input name")
+	}
+	v, ok := inputs[s]
+	if !ok {
+		return nil, fmt.Errorf("__input names %q, which this run has no input for (the workflow must declare it under inputs:)", s)
+	}
+	return v, nil
 }
 
 func resolveRef(ref any, upstream map[string]*pluginpb.StepOutputs) (any, error) {

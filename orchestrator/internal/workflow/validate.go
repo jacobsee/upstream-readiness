@@ -2,6 +2,9 @@ package workflow
 
 import (
 	"fmt"
+	"regexp"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -16,6 +19,9 @@ func ValidateShape(def Definition) error {
 	}
 	if len(def.Steps) == 0 {
 		return fmt.Errorf("workflow %q has no steps", def.ID)
+	}
+	if err := validateInputs(def); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for _, s := range def.Steps {
@@ -56,6 +62,100 @@ func ValidateShape(def Definition) error {
 		}
 	}
 	return detectCycles(def)
+}
+
+var inputNameRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+func validateInputs(def Definition) error {
+	seen := map[string]bool{}
+	for _, in := range def.Inputs {
+		if !inputNameRE.MatchString(in.Name) {
+			return fmt.Errorf("input name %q must match %s", in.Name, inputNameRE)
+		}
+		if seen[in.Name] {
+			return fmt.Errorf("duplicate input %q", in.Name)
+		}
+		seen[in.Name] = true
+		if in.Required && in.Default != nil {
+			return fmt.Errorf("input %q is required and has a default; pick one", in.Name)
+		}
+		if in.Required && def.Schedule != "" {
+			return fmt.Errorf("input %q is required, but scheduled runs can only use defaults", in.Name)
+		}
+	}
+	return nil
+}
+
+// ResolveInputs checks the inputs supplied for one run against the
+// workflow's declarations and returns the full set the run carries:
+// unknown names are rejected, required inputs must be non-empty, and
+// omitted inputs take their default (or "").
+func ResolveInputs(def Definition, supplied map[string]string) (map[string]string, error) {
+	declared := map[string]bool{}
+	for _, in := range def.Inputs {
+		declared[in.Name] = true
+	}
+	var unknown []string
+	for k := range supplied {
+		if !declared[k] {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return nil, fmt.Errorf("workflow %q declares no input %s", def.ID, strings.Join(unknown, ", "))
+	}
+	out := make(map[string]string, len(def.Inputs))
+	for _, in := range def.Inputs {
+		v, ok := supplied[in.Name]
+		if !ok && in.Default != nil {
+			v = *in.Default
+		}
+		if in.Required && v == "" {
+			return nil, fmt.Errorf("input %q is required", in.Name)
+		}
+		out[in.Name] = v
+	}
+	return out, nil
+}
+
+// RerunPlan splits def's steps for a rerun starting at fromStep: rerun
+// is fromStep plus everything downstream of it, reuse is every other
+// step. Both lists keep declaration order.
+func RerunPlan(def Definition, fromStep string) (rerun, reuse []string, err error) {
+	children := map[string][]string{}
+	found := false
+	for _, s := range def.Steps {
+		if s.ID == fromStep {
+			found = true
+		}
+		for _, dep := range s.DependsOn {
+			children[dep] = append(children[dep], s.ID)
+		}
+	}
+	if !found {
+		return nil, nil, fmt.Errorf("workflow %q has no step %q", def.ID, fromStep)
+	}
+	downstream := map[string]bool{}
+	var walk func(string)
+	walk = func(id string) {
+		if downstream[id] {
+			return
+		}
+		downstream[id] = true
+		for _, c := range children[id] {
+			walk(c)
+		}
+	}
+	walk(fromStep)
+	for _, s := range def.Steps {
+		if downstream[s.ID] {
+			rerun = append(rerun, s.ID)
+		} else {
+			reuse = append(reuse, s.ID)
+		}
+	}
+	return rerun, reuse, nil
 }
 
 func detectCycles(def Definition) error {

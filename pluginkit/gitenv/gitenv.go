@@ -133,6 +133,21 @@ var ProtectedEnvKeys = map[string]struct{}{
 	"GOFLAGS":             {},
 }
 
+// CheckRunInputs reports a run input BuildGitEnv can't export: one
+// named like a protected key, or not a valid variable name. Plugins
+// call it before doing any work so the step fails fast and for good.
+func CheckRunInputs(runInputs map[string]string) error {
+	for k := range runInputs {
+		if _, protected := ProtectedEnvKeys[k]; protected {
+			return fmt.Errorf("run input %q is reserved by the plugin's isolation defaults and cannot be set", k)
+		}
+		if !IsValidEnvVarName(k) {
+			return fmt.Errorf("run input %q is not a valid environment variable name", k)
+		}
+	}
+	return nil
+}
+
 // IsValidEnvVarName reports whether s looks like a POSIX shell env var
 // name (leading letter or underscore, then letters/digits/underscores).
 // Anything looser risks producing malformed KEY=VALUE lines when we
@@ -281,7 +296,15 @@ func RepoDirFor(gopathDir, cloneURL string) string {
 // and pick up our configured key - critical when a `replace` directive
 // points at a private fork under a host the Go module proxy has
 // never seen.
-func BuildGitEnv(dir, gopathDir string, cfg InstanceConfig, gitHosts []string) ([]string, error) {
+//
+// runInputs (ExecuteRequest.run_inputs) are exported under their own
+// names, above the instance's env_vars, so every command and make
+// target of the step sees them. An input named like a protected key is
+// an error: the run asked for something the plugin won't do.
+func BuildGitEnv(dir, gopathDir string, cfg InstanceConfig, gitHosts []string, runInputs map[string]string) ([]string, error) {
+	if err := CheckRunInputs(runInputs); err != nil {
+		return nil, err
+	}
 	sshDir := filepath.Join(dir, ".ssh")
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create ssh dir: %w", err)
@@ -365,6 +388,11 @@ func BuildGitEnv(dir, gopathDir string, cfg InstanceConfig, gitHosts []string) (
 		if _, protected := ProtectedEnvKeys[k]; protected {
 			continue
 		}
+		env = append(env, k+"="+v)
+	}
+	// Run inputs: this run's values beat the instance's standing ones.
+	env = StripEnv(env, runInputs)
+	for k, v := range runInputs {
 		env = append(env, k+"="+v)
 	}
 

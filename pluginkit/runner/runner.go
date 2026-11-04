@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -90,6 +91,27 @@ func (r *Runner) Log() string { return r.log.String() }
 func (r *Runner) Note(s string) {
 	r.log.WriteString(s)
 	r.Record(KindNote, "", strings.TrimSpace(s))(0, nil, nil)
+}
+
+// NoteRunInputs records the run inputs the step's environment carries
+// (see gitenv.BuildGitEnv), so the command history shows what every
+// command saw. No-op when the run has none.
+func (r *Runner) NoteRunInputs(inputs map[string]string) {
+	if len(inputs) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(inputs))
+	for k := range inputs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString("# run inputs (exported as env vars):")
+	for _, k := range keys {
+		fmt.Fprintf(&b, " %s=%q", k, inputs[k])
+	}
+	b.WriteString("\n")
+	r.Note(b.String())
 }
 
 // Record starts a recorder entry for work the Runner doesn't execute

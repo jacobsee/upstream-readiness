@@ -200,6 +200,11 @@ message ExecuteRequest {
   // ExecuteSuspend. Empty on the first execution of a step; populated on
   // every re-execution after a resume. The orchestrator never parses it.
   bytes resolution = 11;
+  // Run inputs: the string values the run was started with, one per
+  // input the workflow declares (defaults applied). Identical for every
+  // step of the run; empty for ad-hoc invocations. Unlike the opaque
+  // blobs above, these are orchestrator-owned and always plain strings.
+  map<string, string> run_inputs = 12;
 }
 
 // ExecuteEvent is a single message in the Execute response stream.

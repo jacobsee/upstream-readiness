@@ -40,7 +40,13 @@ instead of implementing around it.
    outputs into `upstream_outputs`; the plugin's own Execute handler
    does substitution using whatever marker syntax it likes. Do not add
    `${step.X.output.Y}` templating, JSON-path resolution, or any
-   schema-based wiring to the orchestrator.
+   schema-based wiring to the orchestrator. The same goes for run
+   inputs: the orchestrator owns them (declared in workflow YAML, plain
+   strings, sent as `ExecuteRequest.run_inputs`), but substituting them
+   into params (`{__input: NAME}`) or exporting them as env vars is
+   plugin code (`pluginkit/refs`, `pluginkit/gitenv`). A rerun's reused
+   outputs are copied byte-for-byte; the orchestrator never looks inside
+   them.
 
 5. **Durable execution lives in Temporal.** The orchestrator is
    stateless w.r.t. running workflows. Do not add in-memory run state,
@@ -272,14 +278,20 @@ intentional.
 
 ## Testing changes locally
 
-Automated tests exist for `plugin-upstream-rebase` and for MFE asset
-delivery:
+Automated tests exist for `plugin-upstream-rebase`, MFE asset
+delivery, the workflow engine's run inputs and reruns, and the
+pluginkit pieces below:
 
 ```bash
 # GetAsset (chunking, ETag, path escapes) and the orchestrator's
 # /plugins/{id}/assets/ route (no services needed):
 (cd pluginkit && go test ./mfeassets/)
 (cd orchestrator && go test ./internal/httpapi/)
+# Workflow shape, run inputs, rerun planning, and ExecuteWorkflow's
+# reused-step path (Temporal test environment; no services needed):
+(cd orchestrator && go test ./internal/workflow/ ./internal/wfengine/)
+# __input / __ref resolution and run-input env layering:
+(cd pluginkit && go test ./refs/ ./gitenv/)
 # Git mechanics against scratch repos (no services needed):
 (cd pluginkit && go test ./shellcmds/)
 (cd plugin-upstream-rebase && go test ./internal/gitrebase/)

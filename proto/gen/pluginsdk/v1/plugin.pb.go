@@ -650,7 +650,12 @@ type ExecuteRequest struct {
 	// a human (or other resolver) answered a prompt this step emitted via
 	// ExecuteSuspend. Empty on the first execution of a step; populated on
 	// every re-execution after a resume. The orchestrator never parses it.
-	Resolution    []byte `protobuf:"bytes,11,opt,name=resolution,proto3" json:"resolution,omitempty"`
+	Resolution []byte `protobuf:"bytes,11,opt,name=resolution,proto3" json:"resolution,omitempty"`
+	// Run inputs: the string values the run was started with, one per
+	// input the workflow declares (defaults applied). Identical for every
+	// step of the run; empty for ad-hoc invocations. Unlike the opaque
+	// blobs above, these are orchestrator-owned and always plain strings.
+	RunInputs     map[string]string `protobuf:"bytes,12,rep,name=run_inputs,json=runInputs,proto3" json:"run_inputs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -758,6 +763,13 @@ func (x *ExecuteRequest) GetWorkflowId() string {
 func (x *ExecuteRequest) GetResolution() []byte {
 	if x != nil {
 		return x.Resolution
+	}
+	return nil
+}
+
+func (x *ExecuteRequest) GetRunInputs() map[string]string {
+	if x != nil {
+		return x.RunInputs
 	}
 	return nil
 }
@@ -1428,7 +1440,7 @@ const file_pluginsdk_v1_plugin_proto_rawDesc = "" +
 	"\x06values\x18\x01 \x03(\v2%.pluginsdk.v1.StepOutputs.ValuesEntryR\x06values\x1a9\n" +
 	"\vValuesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\x8e\x04\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\x98\x05\n" +
 	"\x0eExecuteRequest\x12\x16\n" +
 	"\x06action\x18\x01 \x01(\tR\x06action\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload\x12\x1f\n" +
@@ -1445,10 +1457,15 @@ const file_pluginsdk_v1_plugin_proto_rawDesc = "" +
 	"workflowId\x12\x1e\n" +
 	"\n" +
 	"resolution\x18\v \x01(\fR\n" +
-	"resolution\x1a]\n" +
+	"resolution\x12J\n" +
+	"\n" +
+	"run_inputs\x18\f \x03(\v2+.pluginsdk.v1.ExecuteRequest.RunInputsEntryR\trunInputs\x1a]\n" +
 	"\x14UpstreamOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12/\n" +
-	"\x05value\x18\x02 \x01(\v2\x19.pluginsdk.v1.StepOutputsR\x05value:\x028\x01\"\xc2\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x19.pluginsdk.v1.StepOutputsR\x05value:\x028\x01\x1a<\n" +
+	"\x0eRunInputsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc2\x01\n" +
 	"\fExecuteEvent\x12;\n" +
 	"\bprogress\x18\x01 \x01(\v2\x1d.pluginsdk.v1.ExecuteProgressH\x00R\bprogress\x122\n" +
 	"\x05final\x18\x02 \x01(\v2\x1a.pluginsdk.v1.ExecuteFinalH\x00R\x05final\x128\n" +
@@ -1509,7 +1526,7 @@ func file_pluginsdk_v1_plugin_proto_rawDescGZIP() []byte {
 	return file_pluginsdk_v1_plugin_proto_rawDescData
 }
 
-var file_pluginsdk_v1_plugin_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_pluginsdk_v1_plugin_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_pluginsdk_v1_plugin_proto_goTypes = []any{
 	(*PurgeWorkflowRequest)(nil),  // 0: pluginsdk.v1.PurgeWorkflowRequest
 	(*PurgeWorkflowResponse)(nil), // 1: pluginsdk.v1.PurgeWorkflowResponse
@@ -1534,7 +1551,8 @@ var file_pluginsdk_v1_plugin_proto_goTypes = []any{
 	nil,                           // 20: pluginsdk.v1.PurgeWorkflowResponse.DeletedEntry
 	nil,                           // 21: pluginsdk.v1.StepOutputs.ValuesEntry
 	nil,                           // 22: pluginsdk.v1.ExecuteRequest.UpstreamOutputsEntry
-	nil,                           // 23: pluginsdk.v1.ValidateRequest.UpstreamOutputsEntry
+	nil,                           // 23: pluginsdk.v1.ExecuteRequest.RunInputsEntry
+	nil,                           // 24: pluginsdk.v1.ValidateRequest.UpstreamOutputsEntry
 }
 var file_pluginsdk_v1_plugin_proto_depIdxs = []int32{
 	20, // 0: pluginsdk.v1.PurgeWorkflowResponse.deleted:type_name -> pluginsdk.v1.PurgeWorkflowResponse.DeletedEntry
@@ -1543,31 +1561,32 @@ var file_pluginsdk_v1_plugin_proto_depIdxs = []int32{
 	7,  // 3: pluginsdk.v1.ActionDescriptor.outputs:type_name -> pluginsdk.v1.ActionOutput
 	21, // 4: pluginsdk.v1.StepOutputs.values:type_name -> pluginsdk.v1.StepOutputs.ValuesEntry
 	22, // 5: pluginsdk.v1.ExecuteRequest.upstream_outputs:type_name -> pluginsdk.v1.ExecuteRequest.UpstreamOutputsEntry
-	12, // 6: pluginsdk.v1.ExecuteEvent.progress:type_name -> pluginsdk.v1.ExecuteProgress
-	13, // 7: pluginsdk.v1.ExecuteEvent.final:type_name -> pluginsdk.v1.ExecuteFinal
-	14, // 8: pluginsdk.v1.ExecuteEvent.suspend:type_name -> pluginsdk.v1.ExecuteSuspend
-	9,  // 9: pluginsdk.v1.ExecuteFinal.outputs:type_name -> pluginsdk.v1.StepOutputs
-	23, // 10: pluginsdk.v1.ValidateRequest.upstream_outputs:type_name -> pluginsdk.v1.ValidateRequest.UpstreamOutputsEntry
-	19, // 11: pluginsdk.v1.AssetChunk.header:type_name -> pluginsdk.v1.AssetHeader
-	9,  // 12: pluginsdk.v1.ExecuteRequest.UpstreamOutputsEntry.value:type_name -> pluginsdk.v1.StepOutputs
-	9,  // 13: pluginsdk.v1.ValidateRequest.UpstreamOutputsEntry.value:type_name -> pluginsdk.v1.StepOutputs
-	4,  // 14: pluginsdk.v1.Plugin.Describe:input_type -> pluginsdk.v1.DescribeRequest
-	10, // 15: pluginsdk.v1.Plugin.Execute:input_type -> pluginsdk.v1.ExecuteRequest
-	15, // 16: pluginsdk.v1.Plugin.Validate:input_type -> pluginsdk.v1.ValidateRequest
-	17, // 17: pluginsdk.v1.Plugin.GetAsset:input_type -> pluginsdk.v1.GetAssetRequest
-	2,  // 18: pluginsdk.v1.Plugin.ReleaseStep:input_type -> pluginsdk.v1.ReleaseStepRequest
-	0,  // 19: pluginsdk.v1.Plugin.PurgeWorkflow:input_type -> pluginsdk.v1.PurgeWorkflowRequest
-	5,  // 20: pluginsdk.v1.Plugin.Describe:output_type -> pluginsdk.v1.PluginManifest
-	11, // 21: pluginsdk.v1.Plugin.Execute:output_type -> pluginsdk.v1.ExecuteEvent
-	16, // 22: pluginsdk.v1.Plugin.Validate:output_type -> pluginsdk.v1.ValidateResponse
-	18, // 23: pluginsdk.v1.Plugin.GetAsset:output_type -> pluginsdk.v1.AssetChunk
-	3,  // 24: pluginsdk.v1.Plugin.ReleaseStep:output_type -> pluginsdk.v1.ReleaseStepResponse
-	1,  // 25: pluginsdk.v1.Plugin.PurgeWorkflow:output_type -> pluginsdk.v1.PurgeWorkflowResponse
-	20, // [20:26] is the sub-list for method output_type
-	14, // [14:20] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	23, // 6: pluginsdk.v1.ExecuteRequest.run_inputs:type_name -> pluginsdk.v1.ExecuteRequest.RunInputsEntry
+	12, // 7: pluginsdk.v1.ExecuteEvent.progress:type_name -> pluginsdk.v1.ExecuteProgress
+	13, // 8: pluginsdk.v1.ExecuteEvent.final:type_name -> pluginsdk.v1.ExecuteFinal
+	14, // 9: pluginsdk.v1.ExecuteEvent.suspend:type_name -> pluginsdk.v1.ExecuteSuspend
+	9,  // 10: pluginsdk.v1.ExecuteFinal.outputs:type_name -> pluginsdk.v1.StepOutputs
+	24, // 11: pluginsdk.v1.ValidateRequest.upstream_outputs:type_name -> pluginsdk.v1.ValidateRequest.UpstreamOutputsEntry
+	19, // 12: pluginsdk.v1.AssetChunk.header:type_name -> pluginsdk.v1.AssetHeader
+	9,  // 13: pluginsdk.v1.ExecuteRequest.UpstreamOutputsEntry.value:type_name -> pluginsdk.v1.StepOutputs
+	9,  // 14: pluginsdk.v1.ValidateRequest.UpstreamOutputsEntry.value:type_name -> pluginsdk.v1.StepOutputs
+	4,  // 15: pluginsdk.v1.Plugin.Describe:input_type -> pluginsdk.v1.DescribeRequest
+	10, // 16: pluginsdk.v1.Plugin.Execute:input_type -> pluginsdk.v1.ExecuteRequest
+	15, // 17: pluginsdk.v1.Plugin.Validate:input_type -> pluginsdk.v1.ValidateRequest
+	17, // 18: pluginsdk.v1.Plugin.GetAsset:input_type -> pluginsdk.v1.GetAssetRequest
+	2,  // 19: pluginsdk.v1.Plugin.ReleaseStep:input_type -> pluginsdk.v1.ReleaseStepRequest
+	0,  // 20: pluginsdk.v1.Plugin.PurgeWorkflow:input_type -> pluginsdk.v1.PurgeWorkflowRequest
+	5,  // 21: pluginsdk.v1.Plugin.Describe:output_type -> pluginsdk.v1.PluginManifest
+	11, // 22: pluginsdk.v1.Plugin.Execute:output_type -> pluginsdk.v1.ExecuteEvent
+	16, // 23: pluginsdk.v1.Plugin.Validate:output_type -> pluginsdk.v1.ValidateResponse
+	18, // 24: pluginsdk.v1.Plugin.GetAsset:output_type -> pluginsdk.v1.AssetChunk
+	3,  // 25: pluginsdk.v1.Plugin.ReleaseStep:output_type -> pluginsdk.v1.ReleaseStepResponse
+	1,  // 26: pluginsdk.v1.Plugin.PurgeWorkflow:output_type -> pluginsdk.v1.PurgeWorkflowResponse
+	21, // [21:27] is the sub-list for method output_type
+	15, // [15:21] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_pluginsdk_v1_plugin_proto_init() }
@@ -1590,7 +1609,7 @@ func file_pluginsdk_v1_plugin_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pluginsdk_v1_plugin_proto_rawDesc), len(file_pluginsdk_v1_plugin_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   24,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

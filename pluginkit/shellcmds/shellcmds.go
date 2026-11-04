@@ -27,7 +27,7 @@ type Command struct {
 }
 
 // ValidateRaw checks a still-unresolved params `commands` value (as
-// decoded into `any`). Step params may contain unresolved __ref markers
+// decoded into `any`). Step params may contain unresolved __ref / __input markers
 // at edit time, so only key presence is checked, not value types.
 func ValidateRaw(cmdsRaw any) []string {
 	cmds, ok := cmdsRaw.([]any)

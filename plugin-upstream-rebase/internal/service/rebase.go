@@ -28,7 +28,8 @@ import (
 )
 
 // stepParams is the `rebase` action's params blob. Opaque to the
-// orchestrator; any leaf may be an {"__ref": {...}} marker.
+// orchestrator; any leaf may be an {"__ref": {...}} or {"__input": "NAME"}
+// marker.
 type stepParams struct {
 	// CloneURL is the fork repository whose branch carries the UPSTREAM
 	// commits (read-only for us).
@@ -207,7 +208,10 @@ func (j *job) prepare() error {
 			return status.Errorf(codes.InvalidArgument, "decode step params: %v", err)
 		}
 	}
-	resolved, err := refs.ResolveRefs(j.req.GetPayload(), j.req.GetUpstreamOutputs())
+	if err := gitenv.CheckRunInputs(j.req.GetRunInputs()); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	resolved, err := refs.ResolveRefs(j.req.GetPayload(), j.req.GetUpstreamOutputs(), j.req.GetRunInputs())
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "resolve upstream references: %v", err)
 	}
@@ -285,6 +289,7 @@ func (j *job) execute() error {
 			return err
 		}
 		j.r.Note(fmt.Sprintf("# resuming from checkpoint %s\n", j.run.CheckpointHead))
+		j.r.NoteRunInputs(j.req.GetRunInputs())
 		j.emit("resuming", "resuming from checkpoint")
 		if err := j.syncRerere(); err != nil {
 			return err
@@ -296,6 +301,7 @@ func (j *job) execute() error {
 		if err := j.setupEnv(true); err != nil {
 			return err
 		}
+		j.r.NoteRunInputs(j.req.GetRunInputs())
 		if err := j.fresh(); err != nil {
 			return err
 		}
@@ -334,7 +340,7 @@ func (j *job) setupEnv(clean bool) error {
 	}
 	hosts := append([]string{gitenv.GitHost(j.p.CloneURL), gitenv.GitHost(j.pushURL), gitenv.GitHost(j.p.UpstreamURL)},
 		godeps.ForkHosts(j.dirAutoReplaces)...)
-	env, err := gitenv.BuildGitEnv(j.workDir, gopathDir, j.cfg, hosts)
+	env, err := gitenv.BuildGitEnv(j.workDir, gopathDir, j.cfg, hosts, j.req.GetRunInputs())
 	if err != nil {
 		return err
 	}

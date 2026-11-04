@@ -113,7 +113,8 @@ The smallest set of nouns that describes the system.
 | **Instance** | A persisted configuration record for a plugin. Has an ID (user-chosen or UUID), a plugin ID, a display name, and a plugin-owned opaque `config_blob`. Lives in Postgres. Created by the plugin's `instance-config` MFE slot; stored verbatim. Multiple instances per plugin are normal. |
 | **Workflow** | A DAG of steps with a stable ID, a display name, and an optional cron schedule. Defined only by the `*.yaml` files in the `--workflows` directory, which are upserted into Postgres on startup; there is no API to create or edit one. A stored workflow whose file is gone at startup is flagged **removed**: it can't be run, but its history (and the state plugins keep for it) stays until it is **purged** or the file comes back. |
 | **Step** | One node in the workflow DAG. References `(plugin, instance, action)`, declares `depends_on` step IDs, and carries an opaque `params` blob the plugin owns the shape of. |
-| **Run** | One execution of a workflow. Has a `run_id` the orchestrator generates and uses as the Temporal workflow ID. Records `status` (`running` \| `succeeded` \| `failed`), `started_at`, `completed_at`, and the per-step results. |
+| **Run** | One execution of a workflow. Has a `run_id` the orchestrator generates and uses as the Temporal workflow ID. Records `status` (`running` \| `succeeded` \| `failed`), `started_at`, `completed_at`, its **run inputs**, and the per-step results. A run can be **rerun from a step**: a new run that executes that step and everything downstream of it, and carries every other step's outputs over from the source run. |
+| **Run inputs** | String values a workflow declares under `inputs:` and the user supplies when starting a run (defaults otherwise). Orchestrator-owned, unlike step params. Every step receives them as `ExecuteRequest.run_inputs`; the git plugins export them as environment variables and resolve `{__input: NAME}` markers in step params. |
 | **Outputs** | The named, opaque-bytes values a step's action returned. Stored in the run summary as `outputs[output_name] = raw JSON`. Threaded into downstream steps' Execute calls as `upstream_outputs[upstream_step_id][output_name]`. |
 | **MFE slot** | A named position in the orchestrator shell where the plugin's React component gets mounted with a `mode` prop telling it which surface to render. |
 | **Suspension** | A step whose plugin ended its Execute stream with `ExecuteSuspend` instead of `Final`: it needs outside (human) input. The step sits in `awaiting_resolution`, the shell mounts the plugin's `resolution` slot with the opaque prompt, and when the slot answers, the orchestrator re-executes the step with the opaque answer in `ExecuteRequest.resolution`. The wait is a Temporal Signal wait in the workflow - no timeout, survives restarts. |
@@ -213,6 +214,7 @@ message ExecuteRequest {
   string idempotency_key = 9;                      // stable across retries
   string workflow_id = 10;                         // per-definition (empty for ad-hoc)
   bytes resolution = 11;                           // opaque answer from the "resolution" slot (resumes only)
+  map<string, string> run_inputs = 12;             // the run's inputs (empty for ad-hoc)
 }
 
 message ExecuteEvent {
@@ -269,6 +271,13 @@ commits) or per-run.
 JSON-encoded value. The orchestrator stores them per step and indexes
 them by `(step_id, output_name)` when handing them to a downstream
 step.
+
+`run_inputs` holds one entry per input the workflow declares, with the
+value the run was started with (or the input's default). It is the same
+for every step of a run, and the one field of the request the
+orchestrator defines the shape of: plain strings, names matching
+`[A-Z_][A-Z0-9_]*`. What a plugin does with them is up to the plugin;
+see *Run inputs* below for the git plugins.
 
 ### Validate
 
@@ -481,6 +490,48 @@ the orchestrator wouldn't notice.
 This is the design payoff: chaining works without any orchestrator code
 needing to understand what a "commit" or a "branch" is.
 
+Only a step's direct `depends_on` steps appear in its
+`upstream_outputs`.
+
+### Run inputs
+
+A workflow may declare inputs, supplied per run:
+
+```yaml
+inputs:
+  - name: VERSION              # required; [A-Z_][A-Z0-9_]*, unique
+    description: "Version to stamp into the build"
+    default: "dev"             # optional; used when a run doesn't set it
+  - name: TARGET
+    required: true             # optional; a run must give a non-empty value
+```
+
+**Run now** on a workflow with inputs opens a form for them. The run's
+resolved values (unknown names rejected, required ones checked, defaults
+filled) are stored on `run_summaries.inputs`, shown on the run, and sent
+to every step as `ExecuteRequest.run_inputs`. Scheduled runs use the
+defaults, so a workflow with a `schedule` can't declare a required input.
+
+The git plugins (`pluginkit/gitenv`, `pluginkit/refs`) consume them two
+ways:
+
+- **Environment variables.** Each input is exported under its own name
+  to every command the step runs: shell `commands`, `make` targets, and
+  the `git` / `go` calls. Inputs layer above the instance's `env_vars`
+  and below the plugin's protected isolation variables; an input named
+  like one of those (`HOME`, `GOPATH`, `GOFLAGS`, …) fails the step.
+  `make` reads the environment, so `$(VERSION)` in a Makefile picks the
+  input up; a command can also pass it explicitly, as in
+  `run: make release VERSION=$VERSION`. The values are listed as a
+  note at the top of the step's command history.
+- **`__input` markers.** `{__input: NAME}` anywhere in step params is
+  replaced by the input's string value, the same way `__ref` is replaced
+  by an upstream output, e.g. `target_ref: {__input: TARGET}`. Naming an
+  input the run doesn't have fails the step.
+
+Inputs are stored in plain text in the orchestrator's Postgres. Don't
+use them for secrets.
+
 ### Auto-replace for fork-based chains (`generic-go-dep`)
 
 `generic-go-dep` extends the __ref idea with one plugin-domain
@@ -601,7 +652,9 @@ command history like any other command. Whatever a command changes is
 committed on its own, with `$ <run>` in the commit body. A command that
 leaves the tree unchanged gets no commit. A non-zero exit fails the
 step. `dir` follows the same rules as a `dirs[].path` (relative, no
-`..`). Any value may be a `__ref` marker.
+`..`). Any value may be a `__ref` or `__input` marker, and every
+command sees the run's inputs as environment variables (see *Run
+inputs*).
 
 Commit subjects carry each plugin's usual prefix:
 
@@ -914,12 +967,15 @@ after every plugin's `PurgeWorkflow` and the Temporal cleanup succeeded.
 ### `run_summaries`
 
 ```sql
-run_id       TEXT PRIMARY KEY
-workflow_id  TEXT NOT NULL
-status       TEXT NOT NULL   -- running | succeeded | failed
-started_at   TIMESTAMPTZ NOT NULL
-completed_at TIMESTAMPTZ
-results      JSONB           -- the full RunResult JSON (steps[], outputs)
+run_id          TEXT PRIMARY KEY
+workflow_id     TEXT NOT NULL
+status          TEXT NOT NULL   -- running | succeeded | failed
+started_at      TIMESTAMPTZ NOT NULL
+completed_at    TIMESTAMPTZ
+results         JSONB           -- the full RunResult JSON (steps[], outputs)
+inputs          JSONB           -- the run's resolved inputs, {name: value} (schema v2)
+rerun_of        TEXT NOT NULL DEFAULT ''  -- source run, for a rerun (schema v2)
+rerun_from_step TEXT NOT NULL DEFAULT ''  -- first step it executed again (schema v2)
 ```
 
 `run_summaries` is a denormalised mirror of what the Temporal workflow
@@ -934,19 +990,23 @@ run_id        TEXT NOT NULL
 step_id       TEXT NOT NULL
 plugin        TEXT NOT NULL
 action        TEXT NOT NULL
-status        TEXT NOT NULL   -- running | awaiting_resolution | succeeded | failed | skipped | cancelled
+status        TEXT NOT NULL   -- running | awaiting_resolution | succeeded | reused | failed | skipped | cancelled
 started_at    TIMESTAMPTZ NOT NULL
 completed_at  TIMESTAMPTZ
 error         TEXT NOT NULL DEFAULT ''
 outputs       JSONB           -- the plugin's structured outputs on success
 progress_blob JSONB           -- the most recent opaque progress payload from Execute
-prompt_blob   JSONB           -- the opaque ExecuteSuspend prompt while awaiting_resolution (schema v4)
+prompt_blob   JSONB           -- the opaque ExecuteSuspend prompt while awaiting_resolution
+reused_from   TEXT NOT NULL DEFAULT ''  -- for a reused step, the run that executed it (schema v2)
 PRIMARY KEY (run_id, step_id)
 ```
 
 Per-step lifecycle records written by the Temporal `RecordStepStart`,
 `RecordStepAwaiting`, and `RecordStepFinish` activities, plus in-flight
-updates to `progress_blob` from every Execute progress event. This is what lets
+updates to `progress_blob` from every Execute progress event. A rerun's
+`reused` rows are written by `Engine.RerunFrom` itself, in the same
+transaction as the run's `run_summaries` row, with the outputs copied
+byte-for-byte from the source run. This is what lets
 the UI show live per-step state (and the `step-runtime` slot's most
 recent progress payload) while the workflow is still running instead of
 waiting for `PersistResult` at the end.
@@ -1034,7 +1094,32 @@ that need input.
   in front of it, so its input has no run ID and no `run_summaries` row
   exists. `ExecuteWorkflow` then uses the schedule-generated Temporal
   workflow ID (`<workflow-id>-<scheduled time>`) as the run ID and runs
-  this activity to open the row.
+  this activity to open the row (with the run's default inputs).
+- **Run inputs** - `TriggerRun` resolves the request's inputs against
+  the definition (`workflow.ResolveInputs`) and puts them on the
+  workflow input (`TriggerInput.inputs`); every `RunStep` forwards them
+  as `run_inputs`.
+- **Rerun from a step** - `Engine.RerunFrom` (`POST
+  /api/runs/:run_id/rerun`) starts a new run of the workflow's
+  **current** definition and instance configs. `workflow.RerunPlan`
+  splits the steps: the chosen step and everything downstream of it run
+  again; every other step is **reused**. Each reused step must be
+  `succeeded` (or itself `reused`) in the source run, which must not be
+  running; otherwise nothing starts. The reused steps' `run_steps` rows
+  are written up front, and their stored outputs travel in the workflow
+  input (`TriggerInput.reused`). `ExecuteWorkflow` settles a reused
+  step immediately with those outputs, without any activity (no
+  `RunStep`, no `ReleaseStep`), so its dependents receive them as
+  `upstream_outputs` exactly as if it had just run. `reused` counts as
+  success for the run's status. The rerun gets a new `run_id`, so
+  plugins see it as a fresh run: per-run plugin state starts empty,
+  while state they key by `(workflow_id, step_id)` (saved conflict
+  resolutions, patch queues) applies as usual. Inputs default to the
+  source run's values for inputs the definition still declares. In the
+  UI, every step of a finished run has a **Rerun from here** button
+  (disabled where a reused step didn't succeed) that opens a
+  confirmation listing the steps that will run and the steps that will
+  be reused, plus the inputs form.
 - **No workflow versioning** - `ExecuteWorkflow` has no
   `GetVersion` gates. Changing the order or set of activities it
   schedules makes runs that are still open in Temporal (running or
@@ -1045,7 +1130,8 @@ that need input.
   `upstream-readiness:<workflow-id>`) at startup. The orchestrator
   deletes the schedules it owns that are no longer wanted, and
   recreates every wanted one, because the schedule's arguments embed the
-  definition and instance configs as they were at startup.
+  definition, instance configs, and default inputs as they were at
+  startup.
 - **Purge** - `Engine.PurgeWorkflow` (not a Temporal workflow; it runs
   inside the HTTP request) refuses unless the workflow is removed, none
   of its runs is still running (stale summaries are reconciled with
@@ -1397,7 +1483,7 @@ dynamic-imports.
 |---|---|---|---|
 | `GET` | `/api/workflows` | - | Lists all workflow definitions, each with `removed_at` when its file is gone. Read-only: workflows are defined by the files in `--workflows`. |
 | `GET` | `/api/workflows/:id` | - | Fetches one workflow definition (plus `removed_at`). |
-| `POST` | `/api/workflows/:id/run` | - | Starts an asynchronous run. Returns `{ run_id }` (HTTP 202). 409 if the workflow is removed. |
+| `POST` | `/api/workflows/:id/run` | `{ inputs?: {NAME: "value"} }` (optional) | Starts an asynchronous run with the given run inputs (omitted ones take their default). Returns `{ run_id }` (HTTP 202). 409 if the workflow is removed; 422 if an input is unknown or a required one is missing. |
 | `GET` | `/api/workflows/:id/runs` | - | Lists the 50 most recent runs of this workflow. |
 | `POST` | `/api/workflows/:id/purge` | - | Deletes every trace of a **removed** workflow (plugin state via `PurgeWorkflow`, Temporal executions + schedule, orchestrator rows). 200 with `{ plugins, temporal_runs, orchestrator }` counts. 409 if it isn't removed, a run is still running, or a plugin it used isn't registered. 502 with `{ error, report }` if a plugin's purge failed; nothing else was deleted, so retry. |
 
@@ -1410,6 +1496,11 @@ dynamic-imports.
 | `GET` | `/api/runs/:run_id/events` | - | Server-Sent Events stream for a single run. First frame is a `snapshot` event carrying the current summary + `run_steps` rows (including `prompt` for awaiting steps); subsequent frames are `step-start`, `step-progress`, `step-awaiting`, `step-finish`, and `run-status`. The stream closes on the terminal `run-status` frame. Keepalive comments every 15s. |
 | `POST` | `/api/runs/:run_id/steps/:step_id/resolve` | `{ resolution: <opaque> }` | Answers a suspended step: signals the run's Temporal workflow, which re-executes the step with `ExecuteRequest.resolution` = the blob. 202 on success; 409 if the step isn't `awaiting_resolution`. Called by the shell on behalf of the plugin's `resolution` slot. |
 | `POST` | `/api/runs/:run_id/cancel` | - | Cancels a running workflow via Temporal. Returns 202 immediately; the run summary transitions through the normal termination path. Rejects if the run is already terminal. |
+| `POST` | `/api/runs/:run_id/rerun` | `{ from_step, inputs?: {NAME: "value"} }` | Starts a new run that executes `from_step` and every step downstream of it, reusing this run's outputs for every other step (see *Execution model*). `inputs` replaces the source run's inputs; without it they are carried over. Returns `{ run_id }` (HTTP 202). 409 if the source run is still running or its workflow is removed; 422 if a step it would reuse didn't succeed in the source run, `from_step` doesn't exist, or the inputs are invalid. |
+
+Every `RunSummary` carries `inputs` and, for a rerun, `rerun_of` and
+`rerun_from_step`. A reused step's result (and `run_steps` record) has
+status `reused` and `reused_from`, the run that actually executed it.
 
 ---
 
@@ -1460,6 +1551,11 @@ behind the orchestrator.)
 id: upstream-rebase                                # required, unique
 display_name: "Example Rebase"                     # required
 schedule: "0 6 * * 1"                              # optional cron; empty = manual only
+inputs:                                            # optional run inputs (see "Run inputs")
+  - name: VERSION                                  # [A-Z_][A-Z0-9_]*
+    description: "Version to stamp"                # optional; shown in the run form
+    default: "dev"                                 # optional; `required: true` instead forbids a default
+                                                   # (and a schedule)
 
 steps:
   - id: update-lib-core                            # required, unique within workflow
@@ -1626,9 +1722,9 @@ reads the host's `~/.ssh` or `~/.gitconfig`. Per Execute call:
      one `insteadOf` rewrite per unique git host in play
      (`https://<host>/` → `git@<host>:`) so `go mod tidy`'s internal
      `git clone` uses SSH and picks up the instance's key.
-   - Any `env_vars` from the instance config (see below) are merged
-     into this environment last, except that the keys above are
-     protected from override.
+   - Any `env_vars` from the instance config (see below), then the
+     run's inputs (see *Run inputs*), are merged into this environment
+     last, except that the keys above are protected from override.
 5. The scratch dir (including `GOPATH`, and therefore the Go module
    cache downloaded into it) is removed at the end of the run. Removal
    first walks the tree chmod'ing every directory owner-writable,

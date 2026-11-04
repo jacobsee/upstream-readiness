@@ -113,6 +113,9 @@ type ExecuteArgs struct {
 	// UpstreamOutputs maps upstream step IDs to their structured output
 	// bags. The plugin resolves its own reference markers against this.
 	UpstreamOutputs map[string]map[string][]byte
+	// RunInputs are the run's inputs (declared by the workflow, supplied
+	// when the run was started). Empty for ad-hoc calls.
+	RunInputs map[string]string
 	// OnProgress, if set, is called for every progress event the plugin
 	// emits before its terminal Final event. The payload is the opaque
 	// bytes the plugin sent; the callback is responsible for storing /
@@ -159,6 +162,7 @@ func (r *Registry) Execute(ctx context.Context, args ExecuteArgs) (ExecuteResult
 		IdempotencyKey:  args.IdempotencyKey,
 		UpstreamOutputs: marshalUpstream(args.UpstreamOutputs),
 		Resolution:      args.Resolution,
+		RunInputs:       args.RunInputs,
 	}
 
 	stream, err := entry.client.Execute(ctx, req)

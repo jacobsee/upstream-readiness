@@ -48,7 +48,7 @@ func (s *Store) Close() { s.pool.Close() }
 
 // ── migrations ────────────────────────────────────────────────────────────────
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `
@@ -120,6 +120,19 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 		if _, err := s.pool.Exec(ctx, `INSERT INTO schema_version(version) VALUES (1)`); err != nil {
+			return err
+		}
+	}
+	if have < 2 {
+		if _, err := s.pool.Exec(ctx, `
+			ALTER TABLE run_summaries ADD COLUMN IF NOT EXISTS inputs          JSONB;
+			ALTER TABLE run_summaries ADD COLUMN IF NOT EXISTS rerun_of        TEXT NOT NULL DEFAULT '';
+			ALTER TABLE run_summaries ADD COLUMN IF NOT EXISTS rerun_from_step TEXT NOT NULL DEFAULT '';
+			ALTER TABLE run_steps     ADD COLUMN IF NOT EXISTS reused_from     TEXT NOT NULL DEFAULT '';
+		`); err != nil {
+			return err
+		}
+		if _, err := s.pool.Exec(ctx, `INSERT INTO schema_version(version) VALUES (2)`); err != nil {
 			return err
 		}
 	}
@@ -382,6 +395,13 @@ type RunSummary struct {
 	StartedAt   time.Time       `json:"started_at"`
 	CompletedAt *time.Time      `json:"completed_at,omitempty"`
 	Results     json.RawMessage `json:"results,omitempty"`
+	// Inputs are the run inputs this run was started with, after defaults
+	// were applied.
+	Inputs map[string]string `json:"inputs,omitempty"`
+	// RerunOf and RerunFromStep are set on a run started by "rerun from
+	// step": the source run and the first step that was executed again.
+	RerunOf       string `json:"rerun_of,omitempty"`
+	RerunFromStep string `json:"rerun_from_step,omitempty"`
 	// AwaitingSteps counts this run's steps currently parked in
 	// awaiting_resolution. Populated by the list queries only, so the
 	// runs dashboards can flag runs that need human input.
@@ -392,13 +412,62 @@ type RunSummary struct {
 // to populate RunSummary.AwaitingSteps.
 const awaitingStepsExpr = `(SELECT COUNT(*) FROM run_steps rs WHERE rs.run_id = run_summaries.run_id AND rs.status = 'awaiting_resolution')`
 
-func (s *Store) StartRun(ctx context.Context, r RunSummary) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO run_summaries (run_id, workflow_id, status, started_at)
-		VALUES ($1, $2, $3, $4)
+// runCols is the column list scanRun reads, in order.
+const runCols = `run_id, workflow_id, status, started_at, completed_at, results, inputs, rerun_of, rerun_from_step, ` + awaitingStepsExpr
+
+func scanRun(row pgx.Row) (*RunSummary, error) {
+	var r RunSummary
+	var results, inputs []byte
+	if err := row.Scan(&r.RunID, &r.WorkflowID, &r.Status, &r.StartedAt, &r.CompletedAt, &results, &inputs,
+		&r.RerunOf, &r.RerunFromStep, &r.AwaitingSteps); err != nil {
+		return nil, err
+	}
+	if len(results) > 0 {
+		r.Results = json.RawMessage(results)
+	}
+	if len(inputs) > 0 {
+		if err := json.Unmarshal(inputs, &r.Inputs); err != nil {
+			return nil, fmt.Errorf("run %q inputs: %w", r.RunID, err)
+		}
+	}
+	return &r, nil
+}
+
+// StartRun opens a run's run_summaries row. reused holds the steps a
+// rerun carries over from its source run; they are written to run_steps
+// in the same transaction, already terminal, so the run never shows
+// them as pending.
+func (s *Store) StartRun(ctx context.Context, r RunSummary, reused []StepRecord) error {
+	inputs, err := json.Marshal(r.Inputs)
+	if err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO run_summaries (run_id, workflow_id, status, started_at, inputs, rerun_of, rerun_from_step)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (run_id) DO NOTHING
-	`, r.RunID, r.WorkflowID, r.Status, r.StartedAt)
-	return err
+	`, r.RunID, r.WorkflowID, r.Status, r.StartedAt, inputs, r.RerunOf, r.RerunFromStep); err != nil {
+		return err
+	}
+	for _, st := range reused {
+		outputs := st.Outputs
+		if len(outputs) == 0 {
+			outputs = json.RawMessage(`null`)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO run_steps (run_id, step_id, plugin, action, status, started_at, completed_at, outputs, reused_from)
+			VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8)
+			ON CONFLICT (run_id, step_id) DO NOTHING
+		`, r.RunID, st.StepID, st.Plugin, st.Action, st.Status, r.StartedAt, []byte(outputs), st.ReusedFrom); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) FinishRun(ctx context.Context, runID, status string, completedAt time.Time, results json.RawMessage) error {
@@ -414,25 +483,24 @@ func (s *Store) FinishRun(ctx context.Context, runID, status string, completedAt
 }
 
 func (s *Store) GetRun(ctx context.Context, runID string) (*RunSummary, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT run_id, workflow_id, status, started_at, completed_at, results
-		  FROM run_summaries WHERE run_id = $1
-	`, runID)
-	var r RunSummary
-	var results []byte
-	var completedAt *time.Time
-	err := row.Scan(&r.RunID, &r.WorkflowID, &r.Status, &r.StartedAt, &completedAt, &results)
+	r, err := scanRun(s.pool.QueryRow(ctx, `SELECT `+runCols+` FROM run_summaries WHERE run_id = $1`, runID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
+	return r, err
+}
+
+func collectRuns(rows pgx.Rows) ([]RunSummary, error) {
+	defer rows.Close()
+	var out []RunSummary
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
 	}
-	r.CompletedAt = completedAt
-	if len(results) > 0 {
-		r.Results = json.RawMessage(results)
-	}
-	return &r, nil
+	return out, rows.Err()
 }
 
 // ListRuns returns recent runs across all workflows, newest first. If
@@ -442,7 +510,7 @@ func (s *Store) ListRuns(ctx context.Context, status string, limit int) ([]RunSu
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
-	q := `SELECT run_id, workflow_id, status, started_at, completed_at, results, ` + awaitingStepsExpr + ` FROM run_summaries`
+	q := `SELECT ` + runCols + ` FROM run_summaries`
 	args := []any{}
 	if status != "" {
 		q += ` WHERE status = $1`
@@ -454,22 +522,7 @@ func (s *Store) ListRuns(ctx context.Context, status string, limit int) ([]RunSu
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []RunSummary
-	for rows.Next() {
-		var r RunSummary
-		var results []byte
-		var completedAt *time.Time
-		if err := rows.Scan(&r.RunID, &r.WorkflowID, &r.Status, &r.StartedAt, &completedAt, &results, &r.AwaitingSteps); err != nil {
-			return nil, err
-		}
-		r.CompletedAt = completedAt
-		if len(results) > 0 {
-			r.Results = json.RawMessage(results)
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+	return collectRuns(rows)
 }
 
 func (s *Store) ListRunsForWorkflow(ctx context.Context, workflowID string, limit int) ([]RunSummary, error) {
@@ -477,7 +530,7 @@ func (s *Store) ListRunsForWorkflow(ctx context.Context, workflowID string, limi
 		limit = 50
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT run_id, workflow_id, status, started_at, completed_at, results, `+awaitingStepsExpr+`
+		SELECT `+runCols+`
 		  FROM run_summaries
 		 WHERE workflow_id = $1
 		 ORDER BY started_at DESC
@@ -486,22 +539,7 @@ func (s *Store) ListRunsForWorkflow(ctx context.Context, workflowID string, limi
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []RunSummary
-	for rows.Next() {
-		var r RunSummary
-		var results []byte
-		var completedAt *time.Time
-		if err := rows.Scan(&r.RunID, &r.WorkflowID, &r.Status, &r.StartedAt, &completedAt, &results, &r.AwaitingSteps); err != nil {
-			return nil, err
-		}
-		r.CompletedAt = completedAt
-		if len(results) > 0 {
-			r.Results = json.RawMessage(results)
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+	return collectRuns(rows)
 }
 
 // ── run steps ─────────────────────────────────────────────────────────────────
@@ -516,7 +554,7 @@ type StepRecord struct {
 	StepID      string          `json:"step_id"`
 	Plugin      string          `json:"plugin"`
 	Action      string          `json:"action"`
-	Status      string          `json:"status"` // running | awaiting_resolution | succeeded | failed | skipped | cancelled
+	Status      string          `json:"status"` // running | awaiting_resolution | succeeded | reused | failed | skipped | cancelled
 	StartedAt   time.Time       `json:"started_at"`
 	CompletedAt *time.Time      `json:"completed_at,omitempty"`
 	Error       string          `json:"error,omitempty"`
@@ -525,6 +563,8 @@ type StepRecord struct {
 	// Prompt is the opaque ExecuteSuspend payload while the step is
 	// awaiting_resolution; nil otherwise.
 	Prompt json.RawMessage `json:"prompt,omitempty"`
+	// ReusedFrom is the run a "reused" step's outputs were copied from.
+	ReusedFrom string `json:"reused_from,omitempty"`
 }
 
 // UpsertStepStart records that a step has started. If a row already
@@ -572,7 +612,7 @@ func (s *Store) UpsertStepFinish(ctx context.Context, runID, stepID, status, ste
 // while the workflow is still running.
 func (s *Store) ListStepsForRun(ctx context.Context, runID string) ([]StepRecord, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT run_id, step_id, plugin, action, status, started_at, completed_at, error, outputs, progress_blob, prompt_blob
+		SELECT run_id, step_id, plugin, action, status, started_at, completed_at, error, outputs, progress_blob, prompt_blob, reused_from
 		  FROM run_steps
 		 WHERE run_id = $1
 		 ORDER BY started_at ASC, step_id ASC
@@ -586,7 +626,7 @@ func (s *Store) ListStepsForRun(ctx context.Context, runID string) ([]StepRecord
 		var r StepRecord
 		var completedAt *time.Time
 		var outputs, progress, prompt []byte
-		if err := rows.Scan(&r.RunID, &r.StepID, &r.Plugin, &r.Action, &r.Status, &r.StartedAt, &completedAt, &r.Error, &outputs, &progress, &prompt); err != nil {
+		if err := rows.Scan(&r.RunID, &r.StepID, &r.Plugin, &r.Action, &r.Status, &r.StartedAt, &completedAt, &r.Error, &outputs, &progress, &prompt, &r.ReusedFrom); err != nil {
 			return nil, err
 		}
 		r.CompletedAt = completedAt

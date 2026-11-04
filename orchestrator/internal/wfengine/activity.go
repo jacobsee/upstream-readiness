@@ -83,6 +83,7 @@ func (a *Activities) RunStep(ctx context.Context, in StepActivityInput) (StepAct
 		Attempt:         uint32(info.Attempt),
 		IdempotencyKey:  idempotencyKey,
 		UpstreamOutputs: upstream,
+		RunInputs:       in.RunInputs,
 		OnProgress:      onProgress,
 		Resolution:      []byte(in.Resolution),
 	})
@@ -150,8 +151,8 @@ func (a *Activities) PersistResult(ctx context.Context, in PersistResultInput) e
 // row), so retries are safe.
 func (a *Activities) RecordRunStart(ctx context.Context, in RecordRunStartInput) error {
 	return a.Store.StartRun(ctx, storage.RunSummary{
-		RunID: in.RunID, WorkflowID: in.WorkflowID, Status: "running", StartedAt: in.StartedAt,
-	})
+		RunID: in.RunID, WorkflowID: in.WorkflowID, Status: "running", StartedAt: in.StartedAt, Inputs: in.Inputs,
+	}, nil)
 }
 
 // RecordStepStart writes a run_steps row when a step begins executing.

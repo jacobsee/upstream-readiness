@@ -5,6 +5,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -636,7 +637,11 @@ func (s *Server) workflowRouter(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("workflow %q was removed (its file is no longer in the workflows directory)", id), http.StatusConflict)
 			return
 		}
-		runID, err := s.engine.TriggerRun(r.Context(), def)
+		var req runReq
+		if !decodeOptionalBody(w, r, &req) {
+			return
+		}
+		runID, err := s.engine.TriggerRun(r.Context(), def, req.Inputs)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
@@ -719,6 +724,12 @@ func (s *Server) runRouter(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
+	case "rerun":
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		s.rerun(w, r, runID)
 	case "steps":
 		// /api/runs/:run_id/steps/:step_id/resolve
 		stepID, stepVerb, _ := strings.Cut(sub, "/")
@@ -729,6 +740,66 @@ func (s *Server) runRouter(w http.ResponseWriter, r *http.Request) {
 		s.resolveStep(w, r, runID, stepID)
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+// runReq is the optional body of POST /api/workflows/:id/run.
+type runReq struct {
+	// Inputs are values for the workflow's declared inputs; omitted ones
+	// take their default.
+	Inputs map[string]string `json:"inputs"`
+}
+
+// rerunReq is the body of POST /api/runs/:run_id/rerun.
+type rerunReq struct {
+	FromStep string `json:"from_step"`
+	// Inputs replaces the source run's inputs when present.
+	Inputs map[string]string `json:"inputs"`
+}
+
+// rerun starts a new run of the source run's workflow (its current
+// definition) from one step, reusing the source run's outputs for every
+// step that isn't downstream of it.
+func (s *Server) rerun(w http.ResponseWriter, r *http.Request, runID string) {
+	var req rerunReq
+	if !decodeOptionalBody(w, r, &req) {
+		return
+	}
+	if req.FromStep == "" {
+		http.Error(w, "from_step is required", http.StatusBadRequest)
+		return
+	}
+	src, err := s.store.GetRun(r.Context(), runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if src == nil {
+		http.NotFound(w, r)
+		return
+	}
+	rec, err := s.store.GetWorkflow(r.Context(), src.WorkflowID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if rec == nil || rec.RemovedAt != nil {
+		http.Error(w, fmt.Sprintf("workflow %q was removed (its file is no longer in the workflows directory)", src.WorkflowID), http.StatusConflict)
+		return
+	}
+	def, err := decodeDefinition(*rec)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	newRunID, err := s.engine.RerunFrom(r.Context(), def, runID, req.FromStep, req.Inputs)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusAccepted, map[string]string{"run_id": newRunID})
+	case errors.Is(err, wfengine.ErrRerunSourceBusy):
+		http.Error(w, err.Error(), http.StatusConflict)
+	default:
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	}
 }
 
@@ -768,6 +839,25 @@ func (s *Server) resolveStep(w http.ResponseWriter, r *http.Request, runID, step
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// decodeOptionalBody decodes a JSON request body into v; an empty body
+// leaves v zero. On a malformed body it writes 400 and returns false.
+func decodeOptionalBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	defer r.Body.Close()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return true
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
 
 func decodeDefinition(rec storage.WorkflowRecord) (workflow.Definition, error) {
 	var def workflow.Definition

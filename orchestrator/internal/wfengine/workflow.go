@@ -44,7 +44,7 @@ func ExecuteWorkflow(ctx tworkflow.Context, in TriggerInput) (workflow.RunResult
 			},
 		})
 		if err := tworkflow.ExecuteActivity(startCtx, "RecordRunStart", RecordRunStartInput{
-			RunID: in.RunID, WorkflowID: in.Definition.ID, StartedAt: tworkflow.Now(ctx).UTC(),
+			RunID: in.RunID, WorkflowID: in.Definition.ID, StartedAt: tworkflow.Now(ctx).UTC(), Inputs: in.Inputs,
 		}).Get(startCtx, nil); err != nil {
 			logger.Error("record scheduled run start failed", "err", err)
 		}
@@ -151,6 +151,18 @@ func ExecuteWorkflow(ctx tworkflow.Context, in TriggerInput) (workflow.RunResult
 				}).Get(releaseCtx, nil)
 			}
 
+			// A rerun carries this step over from its source run: no
+			// plugin call, its copied outputs feed dependents as if it had
+			// just succeeded. Its run_steps row already exists.
+			if outs, ok := in.Reused[step.ID]; ok {
+				state.result = StepActivityResult{Outputs: outs}
+				stepResults[stepIdx[step.ID]].Status = workflow.StepReused
+				stepResults[stepIdx[step.ID]].Outputs = outs
+				stepResults[stepIdx[step.ID]].ReusedFrom = in.ReusedFrom
+				state.settle.Set(nil, nil)
+				return
+			}
+
 			// Wait for every declared dependency. If any failed/skipped,
 			// mark this step skipped and signal the future.
 			for _, depID := range step.DependsOn {
@@ -196,6 +208,7 @@ func ExecuteWorkflow(ctx tworkflow.Context, in TriggerInput) (workflow.RunResult
 				Action:          step.Action,
 				Params:          step.Params,
 				UpstreamOutputs: upstream,
+				RunInputs:       in.Inputs,
 			}
 
 			// Per-step StartToClose: steps that legitimately run long (a

@@ -26,6 +26,7 @@ import {
   ToggleGroup,
   ToggleGroupItem,
 } from "@patternfly/react-core";
+import { RunInfo } from "./WorkflowsView.jsx";
 
 // Cross-workflow "Runs" dashboard. Lists recent runs across every
 // workflow, with a status filter. Selecting a run opens its step-level
@@ -199,6 +200,11 @@ export default function RunsView({ workflows, onOpenWorkflow }) {
                                 needs input
                               </Label>
                             )}
+                            {r.rerun_of && (
+                              <Label color="teal" isCompact style={{ marginLeft: 4 }}>
+                                rerun
+                              </Label>
+                            )}
                           </DataListCell>,
                           <DataListCell key="started">
                             <div style={{ fontSize: 12, color: "#6a6e73" }}>
@@ -265,6 +271,7 @@ export default function RunsView({ workflows, onOpenWorkflow }) {
               </Split>
             </CardTitle>
             <CardBody>
+              <RunInfo summary={selectedRun} onSelectRun={setSelectedRunID} />
               {steps.length === 0 ? (
                 <p style={{ color: "#6a6e73", margin: 0 }}>
                   {selectedRun.status === "running"
@@ -284,6 +291,11 @@ export default function RunsView({ workflows, onOpenWorkflow }) {
                         </Split>
                       </DescriptionListTerm>
                       <DescriptionListDescription>
+                        {s.reused_from && (
+                          <div style={{ fontSize: 12, color: "#6a6e73" }}>
+                            Not executed; outputs from <code>{s.reused_from}</code>
+                          </div>
+                        )}
                         {s.error && (
                           <Alert variant="danger" isInline isPlain title="Error">
                             <code style={{ whiteSpace: "pre-wrap" }}>{s.error}</code>
@@ -324,6 +336,7 @@ function statusColor(s) {
 
 function stepColor(s) {
   if (s === "succeeded") return "green";
+  if (s === "reused") return "teal";
   if (s === "failed") return "red";
   if (s === "skipped") return "orange";
   if (s === "running") return "blue";

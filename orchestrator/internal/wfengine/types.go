@@ -33,6 +33,15 @@ type TriggerInput struct {
 	// workflow's steps, keyed by instance ID. The HTTP handler that
 	// starts the workflow loads these from Postgres and bundles them in.
 	InstanceConfigs map[string]json.RawMessage `json:"instance_configs"`
+	// Inputs are the run's resolved inputs (workflow.ResolveInputs),
+	// handed to every step as ExecuteRequest.run_inputs.
+	Inputs map[string]string `json:"inputs,omitempty"`
+	// Reused holds, for a rerun, the steps that are not executed again:
+	// step ID → the outputs copied from the source run. Their run_steps
+	// rows were written by TriggerRun before the workflow started.
+	Reused map[string]map[string]json.RawMessage `json:"reused,omitempty"`
+	// ReusedFrom is the source run of Reused.
+	ReusedFrom string `json:"reused_from,omitempty"`
 }
 
 // StepActivityInput is the payload passed to RunStep for a single step.
@@ -47,6 +56,7 @@ type StepActivityInput struct {
 	Action          string                                `json:"action"`
 	Params          json.RawMessage                       `json:"params"`
 	UpstreamOutputs map[string]map[string]json.RawMessage `json:"upstream_outputs"`
+	RunInputs       map[string]string                     `json:"run_inputs,omitempty"`
 	// Resolution is the opaque blob delivered by the resolve signal when
 	// this execution resumes a suspended step. Empty on first execution.
 	Resolution json.RawMessage `json:"resolution,omitempty"`
@@ -87,9 +97,10 @@ type PersistResultInput struct {
 // run_summaries row of a run started by a Temporal Schedule (manual runs
 // get theirs from TriggerRun before the workflow starts).
 type RecordRunStartInput struct {
-	RunID      string    `json:"run_id"`
-	WorkflowID string    `json:"workflow_id"`
-	StartedAt  time.Time `json:"started_at"`
+	RunID      string            `json:"run_id"`
+	WorkflowID string            `json:"workflow_id"`
+	StartedAt  time.Time         `json:"started_at"`
+	Inputs     map[string]string `json:"inputs,omitempty"`
 }
 
 // RecordStepStartInput is the payload for RecordStepStart, written to
