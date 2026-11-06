@@ -135,6 +135,7 @@ workflows/                   *.yaml workflow files loaded on orchestrator startu
                              define a workflow (a stored one whose file is gone is flagged removed)
 docker-compose.yml           orchestrator Postgres + plugin-owned Postgres + Temporal + Temporal Web UI
 temporal/                    Temporal dynamic config
+hack/backup/                 backup.sh / restore.sh: whole-database dumps of every app Postgres
 ```
 
 Each plugin embeds its `web/dist/` output into its Go binary via
@@ -324,6 +325,9 @@ For the suspend / resolution path, run
 prints: it builds a local upstream/fork pair whose rebase stops for one
 decision and one conflict.
 
+`hack/backup/restore.sh` deletes every Compose volume, so don't run it
+to test a change unless the user has asked you to.
+
 Then open <http://localhost:8080>. For a real end-to-end exercise,
 create a `github-acme-bot` instance under **Instances → Go Dependency
 Updater** (see the README's "End-to-end" section) and run
@@ -366,7 +370,10 @@ If you're adding another plugin that needs per-`(workflow, step)`
 memory, copy this shape: separate Postgres in `docker-compose.yml`,
 `--pg-dsn` + `PG_DSN` on the plugin binary, dedicated `internal/store`
 package with its own `schema_version`, and MFE round-tripping through
-new plugin actions rather than by reaching outside `pluginApi`.
+new plugin actions rather than by reaching outside `pluginApi`. Add the
+new database to `DBS` in `hack/backup/lib.sh`; `backup.sh` fails on a
+Postgres service it doesn't know about, so a plugin's memory can't be
+skipped silently.
 `plugin-upstream-rebase/internal/store` is the larger worked example
 (per-run tables keyed by `workflow_run_id`, reusable answers keyed by
 `(workflow_id, step_id, …)`). Its step-runtime / resolution slots pass

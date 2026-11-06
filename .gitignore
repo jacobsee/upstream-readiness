@@ -8,6 +8,9 @@ dist/
 /plugin-greeter/plugin-greeter
 /plugin-generic-go-dep/plugin-generic-go-dep
 
+# hack/backup output (contains secrets)
+/backups/
+
 # Editor / OS
 .DS_Store
 .idea/

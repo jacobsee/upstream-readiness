@@ -1233,6 +1233,8 @@ workflows/                                   every *.yaml here is loaded at star
 
 docker-compose.yml                           orchestrator postgres + plugin-owned postgres (generic-go-dep, upstream-rebase) + temporal + temporal-ui for local dev
 temporal/dynamicconfig/development-sql.yaml  Temporal auto-setup config (empty map → defaults)
+
+hack/backup/                                 backup.sh and restore.sh for local state (see "Backup and restore")
 ```
 
 ---
@@ -1437,6 +1439,71 @@ In another tab, hit the Temporal UI at <http://localhost:8233> to see
 the full workflow history, the per-step Activity invocations, and any
 retries. The orchestrator's `/api/runs/:run_id` returns the summarised
 `RunResult`.
+
+---
+
+## Backup and restore
+
+Two scripts cover the `docker-compose.yml` databases. They need only
+Docker Compose, since the Postgres tools run inside the containers.
+
+```bash
+hack/backup/backup.sh [output-dir]         # default: backups/<UTC timestamp>
+hack/backup/restore.sh [--yes] <backup-dir>
+```
+
+| Source | Holds | In a backup |
+|---|---|---|
+| orchestrator Postgres | instances, workflow definitions, run history | whole database |
+| `generic-go-dep` Postgres | patch queue, command history | whole database |
+| `upstream-rebase` Postgres | saved resolutions, decisions, rerere cache, patch queue, per-run state, command history | whole database |
+| `workflows/` | workflow files, uncommitted edits included | copied |
+| Temporal Postgres | open executions, schedules | left out |
+| plugin `--work-dir` | resume cache | left out |
+
+Backups can run while the stack is up. The databases are dumped one
+after another, so they can differ by a few seconds. For the cleanest
+result, back up while no runs are in flight.
+
+**Backups contain secrets.** `plugin_instances.config_blob` can hold SSH
+private keys. Backups are written readable only by you and `backups/` is
+git-ignored, but they are not encrypted, so protect them wherever you
+store them.
+
+**Restoring replaces all local state.** Stop the orchestrator and plugins
+first; `restore.sh` refuses while any client is connected to these
+databases. After a typed confirmation it does the following:
+
+1. Saves the current state to `backups/pre-restore-<UTC timestamp>`.
+2. Deletes every Compose volume, Temporal's included.
+3. Loads the dumps.
+4. Marks in-flight runs failed.
+5. Brings the stack back up.
+
+**Temporal starts empty after a restore.** The orchestrator recreates
+schedules from the workflow files at startup and reads instance configs
+from Postgres when a run starts, so neither depends on Temporal's data.
+Three things follow:
+
+- A run that was running or awaiting resolution in the backup comes back
+  as failed, with those steps `cancelled`. Rerun it from a step to
+  continue. Plugin memory was restored, so `upstream-rebase` reuses saved
+  answers rather than asking again.
+- The Temporal Web UI has no history from before the restore. The
+  orchestrator's own run history is intact.
+- Old Temporal state can't replay against newer code, or wake up and push
+  to a fork.
+
+**Workflow files are never overwritten.** `restore.sh` reports any
+differences between `workflows/` and the backup's copy. A workflow whose
+file is missing is flagged removed at the next orchestrator start until
+the file comes back, so copy it back before purging anything.
+
+**Run the commit named in `manifest.txt`, or a newer one.** Migrations
+only go forward, and an older binary doesn't detect a newer schema.
+
+Databases hosted outside Compose (`--pg-dsn` pointing elsewhere) aren't
+covered.
 
 ---
 
